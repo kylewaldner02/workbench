@@ -246,6 +246,7 @@ class MainScreen(Screen):
 
     pr_cache: dict[str, PR] = {}
     _last_cursor_line: int = 0
+    _rebuilding: bool = False
 
     def _on_tree_cursor_changed(self) -> None:
         """Re-evaluate binding states when cursor moves."""
@@ -275,10 +276,12 @@ class MainScreen(Screen):
             pass
 
     def on_tree_node_expanded(self, event: Tree.NodeExpanded) -> None:
-        self._save_fold_state()
+        if not self._rebuilding:
+            self._save_fold_state()
 
     def on_tree_node_collapsed(self, event: Tree.NodeCollapsed) -> None:
-        self._save_fold_state()
+        if not self._rebuilding:
+            self._save_fold_state()
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         node = self._selected_node()
@@ -339,6 +342,13 @@ class MainScreen(Screen):
         self.app.call_from_thread(self._rebuild_tree, all_worktrees, projects)
 
     def _rebuild_tree(self, all_worktrees: list[WorktreeInfo], projects: list) -> None:
+        self._rebuilding = True
+        try:
+            self._do_rebuild_tree(all_worktrees, projects)
+        finally:
+            self._rebuilding = False
+
+    def _do_rebuild_tree(self, all_worktrees: list[WorktreeInfo], projects: list) -> None:
         tree = self.query_one("#main-tree", Tree)
 
         # Capture live fold state before clearing
