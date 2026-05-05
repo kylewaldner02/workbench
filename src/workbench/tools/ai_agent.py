@@ -81,7 +81,8 @@ class ClaudeCodeAgent:
                             pass
 
             if first_user_msg:
-                label = first_user_msg
+                # Collapse whitespace to single line
+                label = " ".join(first_user_msg.split())[:80]
 
             last_active = _relative_time(last_ts) if last_ts else "unknown"
 

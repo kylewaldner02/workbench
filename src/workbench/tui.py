@@ -142,7 +142,10 @@ def _format_session_header() -> Text:
 
 def _format_session_label(session) -> Text:
     label = Text()
-    label.append(f"{session.label:<{COL_SESSION_LABEL}}")
+    truncated = session.label[:COL_SESSION_LABEL - 2]
+    if len(session.label) > COL_SESSION_LABEL - 2:
+        truncated = truncated[:COL_SESSION_LABEL - 4] + ".."
+    label.append(f"{truncated:<{COL_SESSION_LABEL}}")
     status = "● active" if session.is_active else "○ idle"
     if session.is_active:
         label.append(f"{status:<{COL_SESSION_STATUS}}", style="green")
