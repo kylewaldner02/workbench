@@ -28,7 +28,7 @@ from workbench.state import (
     save_fold_state,
     unarchive_project,
 )
-from workbench.status import get_git_status, get_last_commit_time
+from workbench.status import get_git_status, get_last_commit_time, has_unpushed_changes
 from workbench.tools.ai_agent import ClaudeCodeAgent
 from workbench.tools.base import PR
 from workbench.tools.ide import IntelliJIDE
@@ -539,6 +539,13 @@ class MainScreen(Screen):
         if not wt_data:
             return
         wt = wt_data.worktree
+        if has_unpushed_changes(wt.path, wt.branch):
+            self.app.push_screen(ConfirmCloseWorktreeScreen(wt_data))
+        else:
+            self._do_close_worktree(wt_data)
+
+    def _do_close_worktree(self, wt_data: WorktreeNodeData) -> None:
+        wt = wt_data.worktree
         try:
             if wt_data.project_name:
                 remove_worktree_from_project(wt_data.project_name, str(wt.path))
@@ -734,6 +741,34 @@ class AssignToProjectScreen(Screen):
             )
             self.notify(f"Assigned {self.worktree.branch} to {project_name}")
             self.app.pop_screen()
+
+    def action_cancel(self) -> None:
+        self.app.pop_screen()
+
+
+class ConfirmCloseWorktreeScreen(Screen):
+    BINDINGS = [
+        Binding("y", "confirm", "Yes, close"),
+        Binding("n", "cancel", "No, keep"),
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    def __init__(self, wt_data: WorktreeNodeData) -> None:
+        super().__init__()
+        self.wt_data = wt_data
+
+    def compose(self) -> ComposeResult:
+        wt = self.wt_data.worktree
+        yield Vertical(
+            Label(f"Branch '{wt.branch}' has unpushed changes."),
+            Label("Close worktree anyway? (y/n)"),
+        )
+        yield WrappingFooter()
+
+    def action_confirm(self) -> None:
+        self.app.pop_screen()
+        main_screen = self.app.query_one(MainScreen)
+        main_screen._do_close_worktree(self.wt_data)
 
     def action_cancel(self) -> None:
         self.app.pop_screen()

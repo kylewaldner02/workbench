@@ -23,6 +23,27 @@ def get_git_status(worktree_path: Path) -> str:
     return f"{total} changes"
 
 
+def has_unpushed_changes(worktree_path: Path, branch: str) -> bool:
+    """Check if the local branch has commits not on the remote."""
+    # Check for uncommitted changes
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        capture_output=True, text=True, cwd=worktree_path,
+    )
+    if status.returncode == 0 and status.stdout.strip():
+        return True
+
+    # Check for unpushed commits
+    result = subprocess.run(
+        ["git", "log", f"origin/{branch}..{branch}", "--oneline"],
+        capture_output=True, text=True, cwd=worktree_path,
+    )
+    if result.returncode != 0:
+        # No remote tracking branch — treat as unpushed
+        return True
+    return bool(result.stdout.strip())
+
+
 def get_last_commit_time(worktree_path: Path) -> str:
     result = subprocess.run(
         ["git", "log", "-1", "--format=%cr"],
