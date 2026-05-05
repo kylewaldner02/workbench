@@ -15,15 +15,20 @@ class WorktreeInfo:
 
 
 def get_repo_root(cwd: Path | None = None) -> Path:
+    # Use --git-common-dir to resolve to the main repo, not a worktree
     result = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
+        ["git", "rev-parse", "--git-common-dir"],
         capture_output=True,
         text=True,
-        cwd=cwd,
+        cwd=cwd or Path.cwd(),
     )
     if result.returncode != 0:
         raise RuntimeError("Not inside a git repository")
-    return Path(result.stdout.strip())
+    git_dir = Path(result.stdout.strip())
+    if not git_dir.is_absolute():
+        git_dir = (cwd or Path.cwd()) / git_dir
+    # .git dir is inside the repo root
+    return git_dir.parent.resolve()
 
 
 def get_repo_name(repo_path: Path) -> str:

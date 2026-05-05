@@ -5,6 +5,8 @@ from pathlib import Path
 
 
 def get_git_status(worktree_path: Path) -> str:
+    if not worktree_path.exists():
+        return "missing"
     result = subprocess.run(
         ["git", "status", "--porcelain"],
         capture_output=True,
@@ -45,6 +47,8 @@ def has_unpushed_changes(worktree_path: Path, branch: str) -> bool:
 
 
 def get_last_commit_time(worktree_path: Path) -> str:
+    if not worktree_path.exists():
+        return "unknown"
     result = subprocess.run(
         ["git", "log", "-1", "--format=%cr"],
         capture_output=True,
