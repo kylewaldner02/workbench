@@ -12,5 +12,8 @@ dependencies = [
     "typer>=0.12.0",
 ]
 
+[tool.setuptools.packages.find]
+where = ["src"]
+
 [project.scripts]
 workbench = "workbench.cli:app"
