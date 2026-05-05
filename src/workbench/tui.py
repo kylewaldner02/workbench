@@ -375,6 +375,10 @@ class MainScreen(Screen):
                     tree.select_node(node)
                     break
 
+        # Update status bar
+        status = self.query_one("#status-bar", Static)
+        status.update(f" {len(projects)} projects · {len(all_worktrees)} worktrees")
+
     def _add_worktree_node(
         self,
         parent_node: TreeNode,
@@ -403,10 +407,6 @@ class MainScreen(Screen):
             wt_node.expand()
         else:
             wt_node.collapse()
-
-        # Update status bar
-        status = self.query_one("#status-bar", Static)
-        status.update(f" {len(projects)} projects · {len(all_worktrees)} worktrees")
 
     def _selected_node(self) -> TreeNode | None:
         tree = self.query_one("#main-tree", Tree)
