@@ -931,7 +931,7 @@ class ConfirmCloseWorktreeScreen(Screen):
 
     def action_confirm(self) -> None:
         self.app.pop_screen()
-        main_screen = self.app.query_one(MainScreen)
+        main_screen = self.app.screen
         main_screen._do_close_worktree(self.wt_data)
 
     def action_cancel(self) -> None:
