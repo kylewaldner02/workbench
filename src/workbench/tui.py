@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import shlex
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -156,6 +159,21 @@ def _format_session_label(session, width: int) -> Text:
     return label
 
 
+def _open_in_new_terminal(cmd: list[str], cwd: str) -> None:
+    """Open a command in a new Terminal.app window on macOS."""
+    import tempfile
+
+    shell_cmd = " ".join(shlex.quote(c) for c in cmd)
+    # Write a temp script that cd's, runs the command, then cleans itself up
+    fd, script_path = tempfile.mkstemp(suffix=".command")
+    with os.fdopen(fd, "w") as f:
+        f.write("#!/bin/bash\n")
+        f.write(f"cd {shlex.quote(cwd)}\n")
+        f.write(f"exec {shell_cmd}\n")
+    os.chmod(script_path, 0o755)
+    subprocess.Popen(["open", script_path])
+
+
 class WrappingFooter(Static):
     """A footer that wraps keybindings onto multiple lines."""
 
@@ -230,12 +248,17 @@ class MainScreen(Screen):
     BINDINGS = [
         Binding("enter", "drill_down", "Expand"),
         Binding("tab", "drill_down", "Expand", show=False),
-        Binding("c", "open_claude", "Claude"),
+        Binding("c", "open_claude_new_window", "Claude"),
+        Binding("C", "open_claude", "Claude (same term)"),
+        Binding("o", "new_session_new_window", "New Session"),
+        Binding("O", "new_session", "New Session (same term)"),
         Binding("i", "open_ide", "IDE"),
         Binding("g", "open_git", "Git"),
         Binding("p", "open_pr", "PR"),
         Binding("s", "resume_session", "Resume"),
+        Binding("S", "resume_session_same_term", "Resume (same term)"),
         Binding("f", "fork_session", "Fork"),
+        Binding("F", "fork_session_same_term", "Fork (same term)"),
         Binding("x", "close_worktree", "Close WT"),
         Binding("n", "new_worktree", "New WT"),
         Binding("P", "new_project", "New Project"),
@@ -316,11 +339,16 @@ class MainScreen(Screen):
         on_worktree = node is not None and isinstance(node.data, WorktreeNodeData)
 
         worktree_actions = {
-            "open_claude", "open_ide", "open_git", "open_pr",
-            "close_worktree", "assign_to_project",
+            "open_claude", "open_claude_new_window",
+            "new_session", "new_session_new_window",
+            "open_ide", "open_git",
+            "open_pr", "close_worktree", "assign_to_project",
         }
         project_actions = {"archive_project"}
-        session_actions = {"resume_session", "fork_session"}
+        session_actions = {
+            "resume_session", "resume_session_same_term",
+            "fork_session", "fork_session_same_term",
+        }
 
         if action in session_actions:
             return on_session
@@ -539,13 +567,28 @@ class MainScreen(Screen):
         if node and isinstance(node.data, SessionNodeData):
             wt = node.data.worktree
             cmd = ai_agent.resume_cmd(wt.path, node.data.session_id)
+            _open_in_new_terminal(cmd, str(wt.path))
+            self.notify(f"Resumed session in new window for {wt.branch}")
+
+    def action_resume_session_same_term(self) -> None:
+        node = self._selected_node()
+        if node and isinstance(node.data, SessionNodeData):
+            wt = node.data.worktree
+            cmd = ai_agent.resume_cmd(wt.path, node.data.session_id)
             self.app.launch_agent(cmd, str(wt.path))
 
     def action_fork_session(self) -> None:
         node = self._selected_node()
         if node and isinstance(node.data, SessionNodeData):
             wt = node.data.worktree
-            # Fork = resume the session (user diverges from there)
+            cmd = ai_agent.resume_cmd(wt.path, node.data.session_id)
+            _open_in_new_terminal(cmd, str(wt.path))
+            self.notify(f"Forked session in new window for {wt.branch}")
+
+    def action_fork_session_same_term(self) -> None:
+        node = self._selected_node()
+        if node and isinstance(node.data, SessionNodeData):
+            wt = node.data.worktree
             cmd = ai_agent.resume_cmd(wt.path, node.data.session_id)
             self.app.launch_agent(cmd, str(wt.path))
 
@@ -554,12 +597,41 @@ class MainScreen(Screen):
         if not wt_data:
             return
         wt = wt_data.worktree
-        # Resume most recent session, or open new
         sessions = ai_agent.list_sessions(wt.path)
         if sessions:
             cmd = ai_agent.resume_cmd(wt.path, sessions[0].session_id)
         else:
             cmd = ai_agent.open_cmd(wt.path)
+        self.app.launch_agent(cmd, str(wt.path))
+
+    def action_open_claude_new_window(self) -> None:
+        wt_data = self._selected_worktree_data()
+        if not wt_data:
+            return
+        wt = wt_data.worktree
+        sessions = ai_agent.list_sessions(wt.path)
+        if sessions:
+            cmd = ai_agent.resume_cmd(wt.path, sessions[0].session_id)
+        else:
+            cmd = ai_agent.open_cmd(wt.path)
+        _open_in_new_terminal(cmd, str(wt.path))
+        self.notify(f"Opened Claude in new window for {wt.branch}")
+
+    def action_new_session_new_window(self) -> None:
+        wt_data = self._selected_worktree_data()
+        if not wt_data:
+            return
+        wt = wt_data.worktree
+        cmd = ai_agent.open_cmd(wt.path)
+        _open_in_new_terminal(cmd, str(wt.path))
+        self.notify(f"New session in new window for {wt.branch}")
+
+    def action_new_session(self) -> None:
+        wt_data = self._selected_worktree_data()
+        if not wt_data:
+            return
+        wt = wt_data.worktree
+        cmd = ai_agent.open_cmd(wt.path)
         self.app.launch_agent(cmd, str(wt.path))
 
     def action_open_ide(self) -> None:
@@ -970,7 +1042,7 @@ class ArchivedProjectsScreen(Screen):
 class WorkbenchApp(App):
     COMMANDS = set()
     ENABLE_COMMAND_PALETTE = False
-    TITLE = "workbench"
+    TITLE = "workbench-tui"
     CSS = """
     #main-tree {
         height: 1fr;
