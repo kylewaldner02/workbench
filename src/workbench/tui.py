@@ -332,14 +332,12 @@ class MainScreen(Screen):
 
         self.app.call_from_thread(self._rebuild_tree, all_worktrees, projects)
 
-    _first_rebuild: bool = True
-
     def _rebuild_tree(self, all_worktrees: list[WorktreeInfo], projects: list) -> None:
         tree = self.query_one("#main-tree", Tree)
 
-        # Load persisted fold state, then update from live tree (if not first rebuild)
+        # Capture live fold state before clearing
         fold = load_fold_state()
-        if not self._first_rebuild:
+        if tree.root.children:
             for proj_node in tree.root.children:
                 if isinstance(proj_node.data, ProjectNodeData):
                     key = f"project:{proj_node.data.project_name}"
@@ -348,8 +346,6 @@ class MainScreen(Screen):
                     if isinstance(wt_node.data, WorktreeNodeData):
                         key = f"worktree:{wt_node.data.worktree.path}"
                         fold[key] = wt_node.is_expanded
-            save_fold_state(fold)
-        self._first_rebuild = False
 
         tree.root.remove_children()
 
@@ -466,20 +462,35 @@ class MainScreen(Screen):
             return node.data
         return None
 
+    def _save_fold_state(self) -> None:
+        """Persist current fold state to disk."""
+        tree = self.query_one("#main-tree", Tree)
+        fold = load_fold_state()
+        for proj_node in tree.root.children:
+            if isinstance(proj_node.data, ProjectNodeData):
+                fold[f"project:{proj_node.data.project_name}"] = proj_node.is_expanded
+            for wt_node in proj_node.children:
+                if isinstance(wt_node.data, WorktreeNodeData):
+                    fold[f"worktree:{wt_node.data.worktree.path}"] = wt_node.is_expanded
+        save_fold_state(fold)
+
     def action_drill_down(self) -> None:
         node = self._selected_node()
         if not node:
             return
         if isinstance(node.data, WorktreeNodeData):
             node.toggle()
+            self._save_fold_state()
         elif isinstance(node.data, ProjectNodeData):
             node.toggle()
+            self._save_fold_state()
         elif isinstance(node.data, SessionNodeData):
-            # Leaf: collapse parent worktree and select it
+            # Leaf: navigate to parent worktree
             if node.parent:
                 tree = self.query_one("#main-tree", Tree)
                 node.parent.collapse()
                 tree.select_node(node.parent)
+                self._save_fold_state()
 
     def action_resume_session(self) -> None:
         node = self._selected_node()
