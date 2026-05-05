@@ -127,30 +127,24 @@ def _format_header_label() -> Text:
 
 
 # Session sub-columns
-COL_SESSION_LABEL = 40
-COL_SESSION_STATUS = 12
+COL_SESSION_LABEL = 50
 COL_SESSION_ACTIVE = 14
 
 
 def _format_session_header() -> Text:
     label = Text()
     label.append(f"{'Session':<{COL_SESSION_LABEL}}", style="bold dim")
-    label.append(f"{'Status':<{COL_SESSION_STATUS}}", style="bold dim")
     label.append("Last Active", style="bold dim")
     return label
 
 
 def _format_session_label(session) -> Text:
     label = Text()
-    truncated = session.label[:COL_SESSION_LABEL - 2]
-    if len(session.label) > COL_SESSION_LABEL - 2:
-        truncated = truncated[:COL_SESSION_LABEL - 4] + ".."
+    max_len = COL_SESSION_LABEL - 2
+    truncated = session.label[:max_len]
+    if len(session.label) > max_len:
+        truncated = truncated[:max_len - 2] + ".."
     label.append(f"{truncated:<{COL_SESSION_LABEL}}")
-    status = "● active" if session.is_active else "○ idle"
-    if session.is_active:
-        label.append(f"{status:<{COL_SESSION_STATUS}}", style="green")
-    else:
-        label.append(f"{status:<{COL_SESSION_STATUS}}", style="dim")
     label.append(session.last_active, style="dim")
     return label
 
