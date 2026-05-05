@@ -3,15 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.screen import Screen
-from textual.widgets import DataTable, Footer, Header, Input, Label, Select, Static
+from textual.widgets import DataTable, Footer, Header, Input, Label, Select, Static, Tree
+from textual.widgets.tree import TreeNode
 
 from workbench.state import (
-    Project,
     add_repo,
     add_worktree_to_project,
     create_project,
@@ -41,20 +42,67 @@ ide = IntelliJIDE()
 vcs_client = EmacsMagit()
 pr_viewer = GitHubCLIPR()
 
+# Column widths for consistent alignment in tree labels
+COL_BRANCH = 24
+COL_REPO = 16
+COL_STATUS = 10
+COL_CLAUDE = 10
+COL_PR = 8
+COL_COMMIT = 14
+
 
 @dataclass
-class RowItem:
-    """Represents a row in the main table — either a project header or a worktree."""
-    is_project: bool
+class WorktreeNodeData:
+    """Data attached to a worktree tree node."""
+    worktree: WorktreeInfo
     project_name: str | None = None
-    worktree: WorktreeInfo | None = None
+
+
+@dataclass
+class ProjectNodeData:
+    """Data attached to a project tree node."""
+    project_name: str | None  # None = Unassigned
+
+
+def _format_worktree_label(
+    wt: WorktreeInfo,
+    pr_cache: dict[str, PR],
+) -> Text:
+    git_status = get_git_status(wt.path)
+    claude_active = ai_agent.is_active(wt.path)
+    pr = pr_cache.get(wt.branch)
+    pr_col = f"#{pr.number}" if pr else "—"
+    last_commit = get_last_commit_time(wt.path)
+    repo_name = get_repo_name(wt.repo)
+
+    label = Text()
+    label.append(f"{wt.branch:<{COL_BRANCH}}", style="bold")
+    label.append(f"{repo_name:<{COL_REPO}}", style="dim")
+    label.append(f"{git_status:<{COL_STATUS}}")
+    if claude_active:
+        label.append(f"{'● active':<{COL_CLAUDE}}", style="green")
+    else:
+        label.append(f"{'○ idle':<{COL_CLAUDE}}", style="dim")
+    label.append(f"{pr_col:<{COL_PR}}", style="cyan" if pr else "dim")
+    label.append(last_commit, style="dim")
+    return label
+
+
+def _format_header_label() -> Text:
+    """Column header for reference."""
+    label = Text()
+    label.append(f"{'Branch':<{COL_BRANCH}}", style="bold dim")
+    label.append(f"{'Repo':<{COL_REPO}}", style="bold dim")
+    label.append(f"{'Status':<{COL_STATUS}}", style="bold dim")
+    label.append(f"{'Claude':<{COL_CLAUDE}}", style="bold dim")
+    label.append(f"{'PR':<{COL_PR}}", style="bold dim")
+    label.append("Last Commit", style="bold dim")
+    return label
 
 
 class MainScreen(Screen):
-    """Top-level view: projects (expandable) + unassigned worktrees."""
-
     BINDINGS = [
-        Binding("enter", "drill_down", "Open"),
+        Binding("enter", "drill_down", "Sessions"),
         Binding("c", "open_claude", "Claude"),
         Binding("i", "open_ide", "IDE"),
         Binding("g", "open_git", "Git"),
@@ -68,19 +116,19 @@ class MainScreen(Screen):
         Binding("q", "quit", "Quit"),
     ]
 
-    rows: list[RowItem] = []
     pr_cache: dict[str, PR] = {}
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield DataTable(id="main-table")
+        yield Static(_format_header_label(), id="col-header")
+        tree: Tree[WorktreeNodeData | ProjectNodeData] = Tree("workbench", id="main-tree")
+        tree.show_root = False
+        tree.guide_depth = 3
+        yield tree
         yield Static("", id="status-bar")
         yield Footer()
 
     def on_mount(self) -> None:
-        table = self.query_one("#main-table", DataTable)
-        table.cursor_type = "row"
-        table.add_columns("", "Branch", "Repo", "Status", "Claude", "PR", "Last Commit")
         self.load_data()
         self.set_interval(5, self.load_data)
 
@@ -95,112 +143,120 @@ class MainScreen(Screen):
         except Exception:
             self.pr_cache = {}
 
-        # Build row list
-        rows: list[RowItem] = []
+        self.app.call_from_thread(self._rebuild_tree, all_worktrees, projects)
 
-        # Projects with their worktrees
+    def _rebuild_tree(self, all_worktrees: list[WorktreeInfo], projects: list) -> None:
+        tree = self.query_one("#main-tree", Tree)
+
+        # Remember which projects were expanded
+        expanded: set[str | None] = set()
+        for node in tree.root.children:
+            if node.is_expanded and hasattr(node, "data") and isinstance(node.data, ProjectNodeData):
+                expanded.add(node.data.project_name)
+
+        tree.root.remove_children()
+
         assigned_paths: set[str] = set()
+
         for project in projects:
-            rows.append(RowItem(is_project=True, project_name=project.name))
+            wt_count = len(project.worktrees)
+            project_label = Text(f"{project.name} ({wt_count} worktrees)", style="bold")
+            project_node = tree.root.add(
+                project_label,
+                data=ProjectNodeData(project_name=project.name),
+            )
+
             for pw in project.worktrees:
                 assigned_paths.add(pw.worktree_path)
-                # Find matching WorktreeInfo
                 matching = [wt for wt in all_worktrees if str(wt.path) == pw.worktree_path]
                 if matching:
-                    rows.append(RowItem(is_project=False, project_name=project.name, worktree=matching[0]))
+                    wt = matching[0]
+                    label = _format_worktree_label(wt, self.pr_cache)
+                    project_node.add_leaf(
+                        label,
+                        data=WorktreeNodeData(worktree=wt, project_name=project.name),
+                    )
+
+            # Restore expand state, default to expanded
+            if project.name in expanded or project.name not in expanded and not expanded:
+                project_node.expand()
+            else:
+                project_node.collapse()
 
         # Unassigned worktrees
         unassigned = [wt for wt in all_worktrees if str(wt.path) not in assigned_paths]
         if unassigned:
-            rows.append(RowItem(is_project=True, project_name=None))  # "Unassigned" header
+            unassigned_label = Text(f"Unassigned ({len(unassigned)} worktrees)", style="bold italic")
+            unassigned_node = tree.root.add(
+                unassigned_label,
+                data=ProjectNodeData(project_name=None),
+            )
             for wt in unassigned:
-                rows.append(RowItem(is_project=False, project_name=None, worktree=wt))
-
-        self.rows = rows
-        self.app.call_from_thread(self._update_table)
-
-    def _update_table(self) -> None:
-        table = self.query_one("#main-table", DataTable)
-        cursor_row = table.cursor_row
-        table.clear()
-
-        for row in self.rows:
-            if row.is_project:
-                name = row.project_name or "Unassigned"
-                wt_count = sum(
-                    1 for r in self.rows
-                    if not r.is_project and r.project_name == row.project_name
+                label = _format_worktree_label(wt, self.pr_cache)
+                unassigned_node.add_leaf(
+                    label,
+                    data=WorktreeNodeData(worktree=wt, project_name=None),
                 )
-                table.add_row(
-                    "▼", f"[bold]{name}[/bold]", "", "", "", "", f"{wt_count} worktrees",
-                )
+
+            if None in expanded or not expanded:
+                unassigned_node.expand()
             else:
-                wt = row.worktree
-                if not wt:
-                    continue
-                git_status = get_git_status(wt.path)
-                claude_active = ai_agent.is_active(wt.path)
-                claude_col = "● active" if claude_active else "○ idle"
-                pr = self.pr_cache.get(wt.branch)
-                pr_col = f"#{pr.number}" if pr else "—"
-                last_commit = get_last_commit_time(wt.path)
-                repo_name = get_repo_name(wt.repo)
-                table.add_row("  ", wt.branch, repo_name, git_status, claude_col, pr_col, last_commit)
+                unassigned_node.collapse()
 
-        if self.rows and cursor_row < len(self.rows):
-            table.move_cursor(row=cursor_row)
-
-        projects = load_projects()
+        # Update status bar
+        total_wts = len(all_worktrees) - sum(1 for wt in all_worktrees if False)  # all non-bare already filtered
         status = self.query_one("#status-bar", Static)
-        total_wts = sum(1 for r in self.rows if not r.is_project)
-        status.update(f" {len(projects)} projects · {total_wts} worktrees")
+        status.update(f" {len(projects)} projects · {len(all_worktrees)} worktrees")
 
-    def _selected_row(self) -> RowItem | None:
-        table = self.query_one("#main-table", DataTable)
-        if not self.rows:
-            return None
-        row = table.cursor_row
-        if 0 <= row < len(self.rows):
-            return self.rows[row]
+    def _selected_node(self) -> TreeNode | None:
+        tree = self.query_one("#main-tree", Tree)
+        return tree.cursor_node
+
+    def _selected_worktree_data(self) -> WorktreeNodeData | None:
+        node = self._selected_node()
+        if node and isinstance(node.data, WorktreeNodeData):
+            return node.data
         return None
 
-    def _selected_worktree(self) -> WorktreeInfo | None:
-        row = self._selected_row()
-        if row and not row.is_project:
-            return row.worktree
+    def _selected_project_data(self) -> ProjectNodeData | None:
+        node = self._selected_node()
+        if node and isinstance(node.data, ProjectNodeData):
+            return node.data
         return None
 
     def action_drill_down(self) -> None:
-        row = self._selected_row()
-        if not row:
+        wt_data = self._selected_worktree_data()
+        if wt_data:
+            self.app.push_screen(SessionListScreen(wt_data.worktree))
             return
-        if row.is_project and row.project_name:
-            self.app.push_screen(ProjectWorktreeScreen(row.project_name))
-        elif row.worktree:
-            self.app.push_screen(SessionListScreen(row.worktree))
+        # If on a project node, toggle expand/collapse
+        node = self._selected_node()
+        if node and isinstance(node.data, ProjectNodeData):
+            node.toggle()
 
     def action_open_claude(self) -> None:
-        wt = self._selected_worktree()
-        if wt:
-            ai_agent.open(wt.path)
-            self.notify(f"Opened Claude Code in {wt.branch}")
+        wt_data = self._selected_worktree_data()
+        if wt_data:
+            ai_agent.open(wt_data.worktree.path)
+            self.notify(f"Opened Claude Code in {wt_data.worktree.branch}")
 
     def action_open_ide(self) -> None:
-        wt = self._selected_worktree()
-        if wt:
-            ide.open(wt.path)
-            self.notify(f"Opened IDE in {wt.branch}")
+        wt_data = self._selected_worktree_data()
+        if wt_data:
+            ide.open(wt_data.worktree.path)
+            self.notify(f"Opened IDE in {wt_data.worktree.branch}")
 
     def action_open_git(self) -> None:
-        wt = self._selected_worktree()
-        if wt:
-            vcs_client.open(wt.path)
-            self.notify(f"Opened git client in {wt.branch}")
+        wt_data = self._selected_worktree_data()
+        if wt_data:
+            vcs_client.open(wt_data.worktree.path)
+            self.notify(f"Opened git client in {wt_data.worktree.branch}")
 
     def action_open_pr(self) -> None:
-        wt = self._selected_worktree()
-        if not wt:
+        wt_data = self._selected_worktree_data()
+        if not wt_data:
             return
+        wt = wt_data.worktree
         pr = self.pr_cache.get(wt.branch)
         if pr:
             pr_viewer.open_in_browser(wt.branch)
@@ -209,14 +265,13 @@ class MainScreen(Screen):
             self.app.push_screen(CreatePRScreen(wt))
 
     def action_close_worktree(self) -> None:
-        wt = self._selected_worktree()
-        if not wt:
+        wt_data = self._selected_worktree_data()
+        if not wt_data:
             return
-        row = self._selected_row()
+        wt = wt_data.worktree
         try:
-            # Remove from project if assigned
-            if row and row.project_name:
-                remove_worktree_from_project(row.project_name, str(wt.path))
+            if wt_data.project_name:
+                remove_worktree_from_project(wt_data.project_name, str(wt.path))
             remove_worktree(wt.path)
             self.notify(f"Removed worktree {wt.branch}")
             self.load_data()
@@ -224,169 +279,36 @@ class MainScreen(Screen):
             self.notify(str(e), severity="error")
 
     def action_new_worktree(self) -> None:
-        self.app.push_screen(NewWorktreeScreen())
+        # If cursor is on a project, pre-select that project
+        project_name = None
+        wt_data = self._selected_worktree_data()
+        proj_data = self._selected_project_data()
+        if wt_data:
+            project_name = wt_data.project_name
+        elif proj_data:
+            project_name = proj_data.project_name
+        self.app.push_screen(NewWorktreeScreen(project_name=project_name))
 
     def action_new_project(self) -> None:
         self.app.push_screen(NewProjectScreen())
 
     def action_delete_project(self) -> None:
-        row = self._selected_row()
-        if row and row.is_project and row.project_name:
-            delete_project(row.project_name)
-            self.notify(f"Deleted project {row.project_name}")
+        proj_data = self._selected_project_data()
+        if proj_data and proj_data.project_name:
+            delete_project(proj_data.project_name)
+            self.notify(f"Deleted project {proj_data.project_name}")
             self.load_data()
 
     def action_assign_to_project(self) -> None:
-        wt = self._selected_worktree()
-        if wt:
-            self.app.push_screen(AssignToProjectScreen(wt))
+        wt_data = self._selected_worktree_data()
+        if wt_data:
+            self.app.push_screen(AssignToProjectScreen(wt_data.worktree))
 
     def action_refresh(self) -> None:
         self.load_data()
 
     def action_quit(self) -> None:
         self.app.exit()
-
-
-class ProjectWorktreeScreen(Screen):
-    """Drill-down into a project: shows its worktrees with full actions."""
-
-    BINDINGS = [
-        Binding("enter", "view_sessions", "Sessions"),
-        Binding("c", "open_claude", "Claude"),
-        Binding("i", "open_ide", "IDE"),
-        Binding("g", "open_git", "Git"),
-        Binding("p", "open_pr", "PR"),
-        Binding("n", "new_worktree", "New WT"),
-        Binding("x", "close_worktree", "Close WT"),
-        Binding("escape", "go_back", "Back"),
-        Binding("backspace", "go_back", "Back"),
-        Binding("r", "refresh", "Refresh"),
-    ]
-
-    def __init__(self, project_name: str) -> None:
-        super().__init__()
-        self.project_name = project_name
-        self.worktrees: list[WorktreeInfo] = []
-        self.pr_cache: dict[str, PR] = {}
-
-    def compose(self) -> ComposeResult:
-        yield Header()
-        yield Label(f" Project: {self.project_name}", id="project-header")
-        yield DataTable(id="project-wt-table")
-        yield Footer()
-
-    def on_mount(self) -> None:
-        table = self.query_one("#project-wt-table", DataTable)
-        table.cursor_type = "row"
-        table.add_columns("Branch", "Repo", "Status", "Claude", "PR", "Last Commit")
-        self.load_data()
-        self.set_interval(5, self.load_data)
-
-    @work(thread=True)
-    def load_data(self) -> None:
-        repos = load_repos()
-        all_worktrees = list_all_worktrees(repos)
-        project = None
-        for p in load_projects():
-            if p.name == self.project_name:
-                project = p
-                break
-
-        if not project:
-            self.worktrees = []
-        else:
-            wt_paths = {pw.worktree_path for pw in project.worktrees}
-            self.worktrees = [wt for wt in all_worktrees if str(wt.path) in wt_paths]
-
-        try:
-            self.pr_cache = pr_viewer.list_prs()
-        except Exception:
-            self.pr_cache = {}
-
-        self.app.call_from_thread(self._update_table)
-
-    def _update_table(self) -> None:
-        table = self.query_one("#project-wt-table", DataTable)
-        cursor_row = table.cursor_row
-        table.clear()
-
-        for wt in self.worktrees:
-            git_status = get_git_status(wt.path)
-            claude_active = ai_agent.is_active(wt.path)
-            claude_col = "● active" if claude_active else "○ idle"
-            pr = self.pr_cache.get(wt.branch)
-            pr_col = f"#{pr.number}" if pr else "—"
-            last_commit = get_last_commit_time(wt.path)
-            repo_name = get_repo_name(wt.repo)
-            table.add_row(wt.branch, repo_name, git_status, claude_col, pr_col, last_commit)
-
-        if self.worktrees and cursor_row < len(self.worktrees):
-            table.move_cursor(row=cursor_row)
-
-    def _selected_worktree(self) -> WorktreeInfo | None:
-        table = self.query_one("#project-wt-table", DataTable)
-        if not self.worktrees:
-            return None
-        row = table.cursor_row
-        if 0 <= row < len(self.worktrees):
-            return self.worktrees[row]
-        return None
-
-    def action_view_sessions(self) -> None:
-        wt = self._selected_worktree()
-        if wt:
-            self.app.push_screen(SessionListScreen(wt))
-
-    def action_open_claude(self) -> None:
-        wt = self._selected_worktree()
-        if wt:
-            ai_agent.open(wt.path)
-            self.notify(f"Opened Claude Code in {wt.branch}")
-
-    def action_open_ide(self) -> None:
-        wt = self._selected_worktree()
-        if wt:
-            ide.open(wt.path)
-            self.notify(f"Opened IDE in {wt.branch}")
-
-    def action_open_git(self) -> None:
-        wt = self._selected_worktree()
-        if wt:
-            vcs_client.open(wt.path)
-            self.notify(f"Opened git client in {wt.branch}")
-
-    def action_open_pr(self) -> None:
-        wt = self._selected_worktree()
-        if not wt:
-            return
-        pr = self.pr_cache.get(wt.branch)
-        if pr:
-            pr_viewer.open_in_browser(wt.branch)
-            self.notify(f"Opened PR #{pr.number} in browser")
-        else:
-            self.app.push_screen(CreatePRScreen(wt))
-
-    def action_new_worktree(self) -> None:
-        self.app.push_screen(NewWorktreeScreen(project_name=self.project_name))
-
-    def action_close_worktree(self) -> None:
-        wt = self._selected_worktree()
-        if not wt:
-            return
-        try:
-            remove_worktree_from_project(self.project_name, str(wt.path))
-            remove_worktree(wt.path)
-            self.notify(f"Removed worktree {wt.branch}")
-            self.load_data()
-        except RuntimeError as e:
-            self.notify(str(e), severity="error")
-
-    def action_refresh(self) -> None:
-        self.load_data()
-
-    def action_go_back(self) -> None:
-        self.app.pop_screen()
 
 
 class SessionListScreen(Screen):
@@ -545,7 +467,6 @@ class AssignToProjectScreen(Screen):
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.value is not Select.BLANK:
             project_name = str(event.value)
-            # Remove from current project if assigned
             current = find_project_for_worktree(str(self.worktree.path))
             if current:
                 remove_worktree_from_project(current, str(self.worktree.path))
@@ -593,16 +514,19 @@ class CreatePRScreen(Screen):
 class WorkbenchApp(App):
     TITLE = "workbench"
     CSS = """
-    #main-table {
+    #main-tree {
         height: 1fr;
     }
-    #project-wt-table {
-        height: 1fr;
+    #col-header {
+        height: 1;
+        padding: 0 0 0 7;
+        background: $surface;
+        color: $text-muted;
     }
     #session-table {
         height: 1fr;
     }
-    #session-header, #project-header {
+    #session-header {
         padding: 1;
         text-style: bold;
     }
@@ -619,7 +543,6 @@ class WorkbenchApp(App):
     """
 
     def on_mount(self) -> None:
-        # Auto-register current repo if we're in one
         try:
             from workbench.worktree import get_repo_root
             repo = get_repo_root()
