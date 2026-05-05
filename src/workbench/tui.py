@@ -333,20 +333,24 @@ class MainScreen(Screen):
 
         self.app.call_from_thread(self._rebuild_tree, all_worktrees, projects)
 
+    _first_rebuild: bool = True
+
     def _rebuild_tree(self, all_worktrees: list[WorktreeInfo], projects: list) -> None:
         tree = self.query_one("#main-tree", Tree)
 
-        # Capture current fold state from the live tree, then merge with persisted
+        # Load persisted fold state, then update from live tree (if not first rebuild)
         fold = load_fold_state()
-        for proj_node in tree.root.children:
-            if isinstance(proj_node.data, ProjectNodeData):
-                key = f"project:{proj_node.data.project_name}"
-                fold[key] = proj_node.is_expanded
-            for wt_node in proj_node.children:
-                if isinstance(wt_node.data, WorktreeNodeData):
-                    key = f"worktree:{wt_node.data.worktree.path}"
-                    fold[key] = wt_node.is_expanded
-        save_fold_state(fold)
+        if not self._first_rebuild:
+            for proj_node in tree.root.children:
+                if isinstance(proj_node.data, ProjectNodeData):
+                    key = f"project:{proj_node.data.project_name}"
+                    fold[key] = proj_node.is_expanded
+                for wt_node in proj_node.children:
+                    if isinstance(wt_node.data, WorktreeNodeData):
+                        key = f"worktree:{wt_node.data.worktree.path}"
+                        fold[key] = wt_node.is_expanded
+            save_fold_state(fold)
+        self._first_rebuild = False
 
         tree.root.remove_children()
 
