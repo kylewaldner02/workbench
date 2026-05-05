@@ -126,25 +126,25 @@ def _format_header_label() -> Text:
     return label
 
 
-# Session sub-columns
-COL_SESSION_LABEL = 50
-COL_SESSION_ACTIVE = 14
+COL_SESSION_ACTIVE_WIDTH = 14
 
 
-def _format_session_header() -> Text:
+def _format_session_header(width: int) -> Text:
+    label_width = max(width - COL_SESSION_ACTIVE_WIDTH, 20)
     label = Text()
-    label.append(f"{'Session':<{COL_SESSION_LABEL}}", style="bold dim")
+    label.append(f"{'Session':<{label_width}}", style="bold dim")
     label.append("Last Active", style="bold dim")
     return label
 
 
-def _format_session_label(session) -> Text:
-    label = Text()
-    max_len = COL_SESSION_LABEL - 2
+def _format_session_label(session, width: int) -> Text:
+    label_width = max(width - COL_SESSION_ACTIVE_WIDTH, 20)
+    max_len = label_width - 2
     truncated = session.label[:max_len]
     if len(session.label) > max_len:
         truncated = truncated[:max_len - 2] + ".."
-    label.append(f"{truncated:<{COL_SESSION_LABEL}}")
+    label = Text()
+    label.append(f"{truncated:<{label_width}}")
     label.append(session.last_active, style="dim")
     return label
 
@@ -421,10 +421,17 @@ class MainScreen(Screen):
         # Add session children
         sessions = ai_agent.list_sessions(wt.path)
         if sessions:
-            wt_node.add_leaf(_format_session_header(), data=SessionHeaderData())
+            # Estimate available width: tree width minus indent for session depth
+            try:
+                tree_width = self.query_one("#main-tree", Tree).size.width
+            except Exception:
+                tree_width = 80
+            session_indent = 12  # guide chars for depth 2
+            avail = tree_width - session_indent
+            wt_node.add_leaf(_format_session_header(avail), data=SessionHeaderData())
             for s in sessions:
                 wt_node.add_leaf(
-                    _format_session_label(s),
+                    _format_session_label(s, avail),
                     data=SessionNodeData(session_id=s.session_id, worktree=wt),
                 )
 
