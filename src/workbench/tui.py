@@ -84,13 +84,20 @@ class SessionHeaderData:
     pass
 
 
+@dataclass
+class WorktreeExtra:
+    """Pre-computed expensive data for a worktree, gathered in background thread."""
+    git_status: str
+    sessions: list  # list of session objects from ai_agent
+    last_commit: str
+
+
 def _format_worktree_label(
     wt: WorktreeInfo,
+    extra: WorktreeExtra,
     pr_cache: dict[str, PR],
 ) -> Text:
-    git_status = get_git_status(wt.path)
-    sessions = ai_agent.list_sessions(wt.path)
-    session_count = len(sessions)
+    session_count = len(extra.sessions)
     if session_count == 0:
         session_col = "no sessions"
     elif session_count == 1:
@@ -99,19 +106,18 @@ def _format_worktree_label(
         session_col = f"{session_count} sessions"
     pr = pr_cache.get(wt.branch)
     pr_col = f"#{pr.number}" if pr else "—"
-    last_commit = get_last_commit_time(wt.path)
     repo_name = get_repo_name(wt.repo)
 
     label = Text()
     label.append(f"{wt.branch:<{COL_BRANCH}}", style="bold")
     label.append(f"{repo_name:<{COL_REPO}}", style="dim")
-    label.append(f"{git_status:<{COL_STATUS}}")
+    label.append(f"{extra.git_status:<{COL_STATUS}}")
     if session_count > 0:
         label.append(f"{session_col:<{COL_SESSIONS}}", style="green")
     else:
         label.append(f"{session_col:<{COL_SESSIONS}}", style="dim")
     label.append(f"{pr_col:<{COL_PR}}", style="cyan" if pr else "dim")
-    label.append(last_commit, style="dim")
+    label.append(extra.last_commit, style="dim")
     return label
 
 
@@ -249,6 +255,9 @@ class MainScreen(Screen):
     pr_cache: dict[str, PR] = {}
     _last_cursor_line: int = 0
     _rebuilding: bool = False
+    _fold_cache: dict[str, bool] | None = None
+    _fold_dirty: bool = False
+    _fold_flush_timer = None
 
     def _on_tree_cursor_changed(self) -> None:
         """Re-evaluate binding states when cursor moves."""
@@ -276,6 +285,21 @@ class MainScreen(Screen):
             self.query_one(WrappingFooter)._rebuild()
         except Exception:
             pass
+
+    def _get_fold_cache(self) -> dict[str, bool]:
+        if self._fold_cache is None:
+            self._fold_cache = load_fold_state()
+        return self._fold_cache
+
+    def _schedule_fold_flush(self) -> None:
+        if self._fold_flush_timer is not None:
+            self._fold_flush_timer.stop()
+        self._fold_flush_timer = self.set_timer(2.0, self._flush_fold_state)
+
+    def _flush_fold_state(self) -> None:
+        if self._fold_dirty and self._fold_cache is not None:
+            save_fold_state(self._fold_cache)
+            self._fold_dirty = False
 
     def on_tree_node_expanded(self, event: Tree.NodeExpanded) -> None:
         if not self._rebuilding:
@@ -342,20 +366,29 @@ class MainScreen(Screen):
         except Exception:
             self.pr_cache = {}
 
-        self.app.call_from_thread(self._rebuild_tree, all_worktrees, projects)
+        # Pre-compute expensive I/O (git, sessions) in this background thread
+        extras: dict[str, WorktreeExtra] = {}
+        for wt in all_worktrees:
+            extras[str(wt.path)] = WorktreeExtra(
+                git_status=get_git_status(wt.path),
+                sessions=ai_agent.list_sessions(wt.path),
+                last_commit=get_last_commit_time(wt.path),
+            )
 
-    def _rebuild_tree(self, all_worktrees: list[WorktreeInfo], projects: list) -> None:
+        self.app.call_from_thread(self._rebuild_tree, all_worktrees, projects, extras)
+
+    def _rebuild_tree(self, all_worktrees: list[WorktreeInfo], projects: list, extras: dict[str, WorktreeExtra]) -> None:
         self._rebuilding = True
-        self._do_rebuild_tree(all_worktrees, projects)
+        self._do_rebuild_tree(all_worktrees, projects, extras)
         # Defer clearing the flag so queued expand/collapse events are still suppressed
         self.set_timer(0.1, self._end_rebuild)
 
     def _end_rebuild(self) -> None:
         self._rebuilding = False
 
-    def _do_rebuild_tree(self, all_worktrees: list[WorktreeInfo], projects: list) -> None:
+    def _do_rebuild_tree(self, all_worktrees: list[WorktreeInfo], projects: list, extras: dict[str, WorktreeExtra]) -> None:
         tree = self.query_one("#main-tree", Tree)
-        fold = load_fold_state()
+        fold = self._get_fold_cache()
         tree.root.remove_children()
 
         assigned_paths: set[str] = set()
@@ -373,7 +406,7 @@ class MainScreen(Screen):
                 matching = [wt for wt in all_worktrees if str(wt.path) == pw.worktree_path]
                 if matching:
                     wt = matching[0]
-                    self._add_worktree_node(project_node, wt, project.name, fold)
+                    self._add_worktree_node(project_node, wt, project.name, fold, extras)
 
             key = f"project:{project.name}"
             if fold.get(key, True):  # default expanded
@@ -391,7 +424,7 @@ class MainScreen(Screen):
                 data=ProjectNodeData(project_name=None),
             )
             for wt in unassigned:
-                self._add_worktree_node(unassigned_node, wt, None, fold)
+                self._add_worktree_node(unassigned_node, wt, None, fold, extras)
 
             key = "project:None"
             if fold.get(key, True):  # default expanded
@@ -419,15 +452,17 @@ class MainScreen(Screen):
         wt: WorktreeInfo,
         project_name: str | None,
         fold: dict[str, bool],
+        extras: dict[str, WorktreeExtra],
     ) -> None:
-        label = _format_worktree_label(wt, self.pr_cache)
+        extra = extras.get(str(wt.path), WorktreeExtra(git_status="?", sessions=[], last_commit="?"))
+        label = _format_worktree_label(wt, extra, self.pr_cache)
         wt_node = parent_node.add(
             label,
             data=WorktreeNodeData(worktree=wt, project_name=project_name),
         )
 
         # Add session children
-        sessions = ai_agent.list_sessions(wt.path)
+        sessions = extra.sessions
         if sessions:
             # Estimate available width: tree width minus indent for session depth
             try:
@@ -472,16 +507,17 @@ class MainScreen(Screen):
         return None
 
     def _save_fold_state(self) -> None:
-        """Persist current fold state to disk."""
+        """Update in-memory fold state and schedule a debounced disk write."""
         tree = self.query_one("#main-tree", Tree)
-        fold = load_fold_state()
+        fold = self._get_fold_cache()
         for proj_node in tree.root.children:
             if isinstance(proj_node.data, ProjectNodeData):
                 fold[f"project:{proj_node.data.project_name}"] = proj_node.is_expanded
             for wt_node in proj_node.children:
                 if isinstance(wt_node.data, WorktreeNodeData):
                     fold[f"worktree:{wt_node.data.worktree.path}"] = wt_node.is_expanded
-        save_fold_state(fold)
+        self._fold_dirty = True
+        self._schedule_fold_flush()
 
     def action_drill_down(self) -> None:
         node = self._selected_node()
@@ -638,6 +674,7 @@ class MainScreen(Screen):
         self.load_data()
 
     def action_quit(self) -> None:
+        self._flush_fold_state()
         self.app.exit()
 
 
@@ -979,7 +1016,11 @@ class WorkbenchApp(App):
         try:
             from workbench.worktree import get_repo_root
             repo = get_repo_root()
-            add_repo(str(repo))
+            # Don't auto-add home dir, root, or shallow system paths
+            home = Path.home()
+            skip = {Path("/"), home, home / "Desktop", home / "Documents", home / "src"}
+            if repo not in skip and len(repo.parts) > 2:
+                add_repo(str(repo))
         except RuntimeError:
             pass
         self.push_screen(MainScreen())
