@@ -1,0 +1,25 @@
+#!/bin/zsh
+# Workbench.app launcher — focuses existing terminal window running the workbench TUI, or opens a new one
+
+osascript -e '
+tell application "Terminal"
+    set found to false
+    repeat with w in windows
+        repeat with t in tabs of w
+            set tabProcesses to processes of t
+            if tabProcesses contains "workbench" then
+                set selected tab of w to t
+                set frontmost of w to true
+                activate
+                set found to true
+                exit repeat
+            end if
+        end repeat
+        if found then exit repeat
+    end repeat
+    if not found then
+        activate
+        do script "workbench"
+    end if
+end tell
+'
