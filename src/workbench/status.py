@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import subprocess
-from collections import Counter
 from pathlib import Path
 
 
@@ -16,29 +15,12 @@ def get_git_status(worktree_path: Path) -> str:
         return "error"
     lines = result.stdout.strip().splitlines()
     if not lines:
-        return "clean"
+        return "✓ clean"
 
-    counts: Counter[str] = Counter()
-    for line in lines:
-        if len(line) < 2:
-            continue
-        xy = line[:2]
-        if xy[0] == "?" or xy[1] == "?":
-            counts["U"] += 1  # untracked
-        elif xy[0] in ("M", " ") or xy[1] == "M":
-            counts["M"] += 1
-        elif xy[0] == "A" or xy[1] == "A":
-            counts["A"] += 1
-        elif xy[0] == "D" or xy[1] == "D":
-            counts["D"] += 1
-        else:
-            counts["?"] += 1
-
-    parts = []
-    for key in ("M", "A", "D", "U"):
-        if counts[key]:
-            parts.append(f"{counts[key]}{key}")
-    return " ".join(parts) if parts else "clean"
+    total = len(lines)
+    if total == 1:
+        return "1 change"
+    return f"{total} changes"
 
 
 def get_last_commit_time(worktree_path: Path) -> str:

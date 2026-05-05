@@ -49,8 +49,8 @@ pr_viewer = GitHubCLIPR()
 # Column widths for consistent alignment in tree labels
 COL_BRANCH = 24
 COL_REPO = 16
-COL_STATUS = 10
-COL_CLAUDE = 10
+COL_STATUS = 12
+COL_SESSIONS = 14
 COL_PR = 8
 COL_COMMIT = 14
 
@@ -73,7 +73,14 @@ def _format_worktree_label(
     pr_cache: dict[str, PR],
 ) -> Text:
     git_status = get_git_status(wt.path)
-    claude_active = ai_agent.is_active(wt.path)
+    sessions = ai_agent.list_sessions(wt.path)
+    session_count = len(sessions)
+    if session_count == 0:
+        session_col = "no sessions"
+    elif session_count == 1:
+        session_col = "1 session"
+    else:
+        session_col = f"{session_count} sessions"
     pr = pr_cache.get(wt.branch)
     pr_col = f"#{pr.number}" if pr else "—"
     last_commit = get_last_commit_time(wt.path)
@@ -83,10 +90,10 @@ def _format_worktree_label(
     label.append(f"{wt.branch:<{COL_BRANCH}}", style="bold")
     label.append(f"{repo_name:<{COL_REPO}}", style="dim")
     label.append(f"{git_status:<{COL_STATUS}}")
-    if claude_active:
-        label.append(f"{'● active':<{COL_CLAUDE}}", style="green")
+    if session_count > 0:
+        label.append(f"{session_col:<{COL_SESSIONS}}", style="green")
     else:
-        label.append(f"{'○ idle':<{COL_CLAUDE}}", style="dim")
+        label.append(f"{session_col:<{COL_SESSIONS}}", style="dim")
     label.append(f"{pr_col:<{COL_PR}}", style="cyan" if pr else "dim")
     label.append(last_commit, style="dim")
     return label
@@ -98,7 +105,7 @@ def _format_header_label() -> Text:
     label.append(f"{'Branch':<{COL_BRANCH}}", style="bold dim")
     label.append(f"{'Repo':<{COL_REPO}}", style="bold dim")
     label.append(f"{'Status':<{COL_STATUS}}", style="bold dim")
-    label.append(f"{'Claude':<{COL_CLAUDE}}", style="bold dim")
+    label.append(f"{'Sessions':<{COL_SESSIONS}}", style="bold dim")
     label.append(f"{'PR':<{COL_PR}}", style="bold dim")
     label.append("Last Commit", style="bold dim")
     return label
@@ -770,7 +777,7 @@ class WorkbenchApp(App):
     }
     #col-header {
         height: 1;
-        padding: 0 0 0 7;
+        padding: 0 0 0 6;
         background: $surface;
         color: $text-muted;
     }
