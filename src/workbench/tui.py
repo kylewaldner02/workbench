@@ -365,6 +365,16 @@ class MainScreen(Screen):
             else:
                 unassigned_node.collapse()
 
+        # Move cursor to first worktree node if nothing selected
+        if tree.cursor_node is None or tree.cursor_node is tree.root:
+            for node in tree.root.children:
+                if node.children:
+                    tree.select_node(node.children[0])
+                    break
+                else:
+                    tree.select_node(node)
+                    break
+
     def _add_worktree_node(
         self,
         parent_node: TreeNode,
@@ -393,16 +403,6 @@ class MainScreen(Screen):
             wt_node.expand()
         else:
             wt_node.collapse()
-
-        # Move cursor to first worktree node if nothing selected
-        if tree.cursor_node is None or tree.cursor_node is tree.root:
-            for node in tree.root.children:
-                if node.children:
-                    tree.select_node(node.children[0])
-                    break
-                else:
-                    tree.select_node(node)
-                    break
 
         # Update status bar
         status = self.query_one("#status-bar", Static)
