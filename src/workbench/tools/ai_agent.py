@@ -33,8 +33,8 @@ class ClaudeCodeAgent:
 
     def _find_project_dir(self, worktree_path: Path) -> Path | None:
         resolved = str(worktree_path.resolve())
-        # Claude Code encodes paths by replacing / with -
-        encoded = resolved.lstrip("/").replace("/", "-")
+        # Claude Code encodes paths: /foo/bar.baz -> -foo-bar-baz
+        encoded = resolved.replace("/", "-").replace(".", "-")
         candidate = self.CLAUDE_PROJECTS_DIR / encoded
         if candidate.exists():
             return candidate
@@ -43,7 +43,7 @@ class ClaudeCodeAgent:
         if not self.CLAUDE_PROJECTS_DIR.exists():
             return None
         for d in self.CLAUDE_PROJECTS_DIR.iterdir():
-            if d.is_dir() and resolved.replace("/", "-").endswith(d.name):
+            if d.is_dir() and d.name == encoded:
                 return d
         return None
 
@@ -62,15 +62,18 @@ class ClaudeCodeAgent:
                         entry = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    if first_user_msg is None and entry.get("role") == "human":
-                        content = entry.get("content", "")
-                        if isinstance(content, list):
-                            for block in content:
-                                if isinstance(block, dict) and block.get("type") == "text":
-                                    first_user_msg = block["text"][:80]
-                                    break
-                        elif isinstance(content, str):
-                            first_user_msg = content[:80]
+                    # Extract first user message
+                    if first_user_msg is None:
+                        msg = entry.get("message", {})
+                        if entry.get("type") == "user" or msg.get("role") == "user":
+                            content = msg.get("content", entry.get("content", ""))
+                            if isinstance(content, list):
+                                for block in content:
+                                    if isinstance(block, dict) and block.get("type") == "text":
+                                        first_user_msg = block["text"][:80]
+                                        break
+                            elif isinstance(content, str) and content.strip():
+                                first_user_msg = content.strip()[:80]
                     if "timestamp" in entry:
                         try:
                             last_ts = datetime.fromisoformat(entry["timestamp"])
@@ -81,12 +84,11 @@ class ClaudeCodeAgent:
                 label = first_user_msg
 
             last_active = _relative_time(last_ts) if last_ts else "unknown"
-            is_active = self.is_active(worktree_path)
 
             return Session(
                 session_id=path.stem,
                 label=label,
-                is_active=is_active,
+                is_active=False,
                 last_active=last_active,
             )
         except OSError:
