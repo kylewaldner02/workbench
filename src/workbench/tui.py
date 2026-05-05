@@ -9,7 +9,8 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.screen import Screen
-from textual.widgets import DataTable, Footer, Header, Input, Label, Select, Static, Tree
+from textual.widget import Widget
+from textual.widgets import DataTable, Header, Input, Label, Select, Static, Tree
 from textual.widgets.tree import TreeNode
 
 from workbench.state import (
@@ -61,7 +62,7 @@ class WorktreeNodeData:
 @dataclass
 class ProjectNodeData:
     """Data attached to a project tree node."""
-    project_name: str | None  # None = Unassigned
+    project_name: str | None  # None = No Project
 
 
 def _format_worktree_label(
@@ -100,9 +101,56 @@ def _format_header_label() -> Text:
     return label
 
 
+class WrappingFooter(Static):
+    """A footer that wraps keybindings onto multiple lines."""
+
+    DEFAULT_CSS = """
+    WrappingFooter {
+        dock: bottom;
+        background: $surface;
+        padding: 0 1;
+    }
+    """
+
+    def on_mount(self) -> None:
+        self._rebuild()
+        self.set_interval(0.5, self._rebuild)
+
+    def _rebuild(self) -> None:
+        try:
+            active = self.app.active_bindings
+        except Exception:
+            return
+
+        entries: list[tuple[str, str, bool]] = []
+        seen: set[str] = set()
+        for key, active_binding in active.items():
+            binding = active_binding.binding
+            if not binding.show:
+                continue
+            if binding.description in seen:
+                continue
+            seen.add(binding.description)
+            entries.append((binding.key, binding.description, active_binding.enabled))
+
+        label = Text()
+        for i, (key, desc, enabled) in enumerate(entries):
+            if i > 0:
+                label.append("  ")
+            if enabled:
+                label.append(key, style="bold cyan")
+                label.append(f" {desc}")
+            else:
+                label.append(key, style="dim")
+                label.append(f" {desc}", style="dim")
+
+        self.update(label)
+
+
 class MainScreen(Screen):
     BINDINGS = [
         Binding("enter", "drill_down", "Sessions"),
+        Binding("tab", "drill_down", "Sessions", show=False),
         Binding("c", "open_claude", "Claude"),
         Binding("i", "open_ide", "IDE"),
         Binding("g", "open_git", "Git"),
@@ -114,19 +162,49 @@ class MainScreen(Screen):
         Binding("a", "assign_to_project", "Assign"),
         Binding("r", "refresh", "Refresh"),
         Binding("q", "quit", "Quit"),
+        # Emacs navigation
+        Binding("ctrl+n", "cursor_down", "Down", show=False),
+        Binding("ctrl+p", "cursor_up", "Up", show=False),
+        Binding("ctrl+f", "cursor_expand", "Expand", show=False),
+        Binding("ctrl+b", "cursor_collapse", "Collapse", show=False),
     ]
 
     pr_cache: dict[str, PR] = {}
 
+    def _on_tree_cursor_changed(self) -> None:
+        """Re-evaluate binding states when cursor moves."""
+        self.refresh_bindings()
+
+    def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
+        self._on_tree_cursor_changed()
+        try:
+            self.query_one(WrappingFooter).refresh()
+        except Exception:
+            pass
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        """Disable worktree-only actions when a project node is selected."""
+        worktree_actions = {
+            "open_claude", "open_ide", "open_git", "open_pr",
+            "close_worktree", "assign_to_project",
+        }
+        project_actions = {"delete_project"}
+
+        if action in worktree_actions:
+            return self._selected_worktree_data() is not None
+        if action in project_actions:
+            proj = self._selected_project_data()
+            return proj is not None and proj.project_name is not None
+        return True
+
     def compose(self) -> ComposeResult:
-        yield Header()
         yield Static(_format_header_label(), id="col-header")
         tree: Tree[WorktreeNodeData | ProjectNodeData] = Tree("workbench", id="main-tree")
         tree.show_root = False
         tree.guide_depth = 3
         yield tree
         yield Static("", id="status-bar")
-        yield Footer()
+        yield WrappingFooter()
 
     def on_mount(self) -> None:
         self.load_data()
@@ -160,7 +238,7 @@ class MainScreen(Screen):
 
         for project in projects:
             wt_count = len(project.worktrees)
-            project_label = Text(f"{project.name} ({wt_count} worktrees)", style="bold")
+            project_label = Text(f"{project.name} ({wt_count} worktree{'s' if wt_count != 1 else ''})", style="bold")
             project_node = tree.root.add(
                 project_label,
                 data=ProjectNodeData(project_name=project.name),
@@ -183,10 +261,11 @@ class MainScreen(Screen):
             else:
                 project_node.collapse()
 
-        # Unassigned worktrees
+        # No Project worktrees
         unassigned = [wt for wt in all_worktrees if str(wt.path) not in assigned_paths]
         if unassigned:
-            unassigned_label = Text(f"Unassigned ({len(unassigned)} worktrees)", style="bold italic")
+            wt_count = len(unassigned)
+            unassigned_label = Text(f"No Project ({wt_count} worktree{'s' if wt_count != 1 else ''})", style="bold italic")
             unassigned_node = tree.root.add(
                 unassigned_label,
                 data=ProjectNodeData(project_name=None),
@@ -203,8 +282,17 @@ class MainScreen(Screen):
             else:
                 unassigned_node.collapse()
 
+        # Move cursor to first worktree node if nothing selected
+        if tree.cursor_node is None or tree.cursor_node is tree.root:
+            for node in tree.root.children:
+                if node.children:
+                    tree.select_node(node.children[0])
+                    break
+                else:
+                    tree.select_node(node)
+                    break
+
         # Update status bar
-        total_wts = len(all_worktrees) - sum(1 for wt in all_worktrees if False)  # all non-bare already filtered
         status = self.query_one("#status-bar", Static)
         status.update(f" {len(projects)} projects · {len(all_worktrees)} worktrees")
 
@@ -304,6 +392,24 @@ class MainScreen(Screen):
         if wt_data:
             self.app.push_screen(AssignToProjectScreen(wt_data.worktree))
 
+    def action_cursor_down(self) -> None:
+        tree = self.query_one("#main-tree", Tree)
+        tree.action_cursor_down()
+
+    def action_cursor_up(self) -> None:
+        tree = self.query_one("#main-tree", Tree)
+        tree.action_cursor_up()
+
+    def action_cursor_expand(self) -> None:
+        node = self._selected_node()
+        if node and isinstance(node.data, ProjectNodeData):
+            node.expand()
+
+    def action_cursor_collapse(self) -> None:
+        node = self._selected_node()
+        if node and isinstance(node.data, ProjectNodeData):
+            node.collapse()
+
     def action_refresh(self) -> None:
         self.load_data()
 
@@ -329,7 +435,7 @@ class SessionListScreen(Screen):
         yield Header()
         yield Label(f" Sessions for {self.worktree.branch}", id="session-header")
         yield DataTable(id="session-table")
-        yield Footer()
+        yield WrappingFooter()
 
     def on_mount(self) -> None:
         table = self.query_one("#session-table", DataTable)
@@ -512,6 +618,8 @@ class CreatePRScreen(Screen):
 
 
 class WorkbenchApp(App):
+    COMMANDS = set()
+    ENABLE_COMMAND_PALETTE = False
     TITLE = "workbench"
     CSS = """
     #main-tree {
