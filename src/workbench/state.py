@@ -5,9 +5,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 STATE_DIR = Path.home() / ".workbench"
-PROJECTS_FILE = STATE_DIR / "projects.json"
-REPOS_FILE = STATE_DIR / "repos.json"
-FOLD_STATE_FILE = STATE_DIR / "fold_state.json"
+LOCAL_STATE_DIR = STATE_DIR / "local-state"
+PROJECTS_FILE = LOCAL_STATE_DIR / "projects.json"
+REPOS_FILE = LOCAL_STATE_DIR / "repos.json"
+FOLD_STATE_FILE = LOCAL_STATE_DIR / "fold_state.json"
+HIDDEN_WORKTREES_FILE = LOCAL_STATE_DIR / "hidden_worktrees.json"
 
 
 @dataclass
@@ -46,7 +48,7 @@ class Project:
 
 
 def _ensure_dir() -> None:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    LOCAL_STATE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # --- Projects ---
@@ -207,3 +209,34 @@ def load_fold_state() -> dict[str, bool]:
 def save_fold_state(state: dict[str, bool]) -> None:
     _ensure_dir()
     FOLD_STATE_FILE.write_text(json.dumps(state, indent=2) + "\n")
+
+
+# --- Hidden Worktrees ---
+
+
+def load_hidden_worktrees() -> set[str]:
+    if not HIDDEN_WORKTREES_FILE.exists():
+        return set()
+    try:
+        data = json.loads(HIDDEN_WORKTREES_FILE.read_text())
+        return set(data.get("hidden", []))
+    except (json.JSONDecodeError, OSError):
+        return set()
+
+
+def save_hidden_worktrees(hidden: set[str]) -> None:
+    _ensure_dir()
+    data = {"hidden": sorted(hidden)}
+    HIDDEN_WORKTREES_FILE.write_text(json.dumps(data, indent=2) + "\n")
+
+
+def hide_worktree(worktree_path: str) -> None:
+    hidden = load_hidden_worktrees()
+    hidden.add(worktree_path)
+    save_hidden_worktrees(hidden)
+
+
+def unhide_worktree(worktree_path: str) -> None:
+    hidden = load_hidden_worktrees()
+    hidden.discard(worktree_path)
+    save_hidden_worktrees(hidden)

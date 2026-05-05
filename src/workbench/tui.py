@@ -20,12 +20,15 @@ from workbench.state import (
     create_project,
     delete_project,
     find_project_for_worktree,
+    hide_worktree,
     load_archived_projects,
     load_fold_state,
+    load_hidden_worktrees,
     load_projects,
     load_repos,
     remove_worktree_from_project,
     save_fold_state,
+    unhide_worktree,
     unarchive_project,
 )
 from workbench.status import get_git_status, get_last_commit_time, has_unpushed_changes
@@ -38,6 +41,7 @@ from workbench.worktree import (
     WorktreeInfo,
     create_worktree,
     get_repo_name,
+    is_main_worktree,
     list_all_worktrees,
     remove_worktree,
 )
@@ -331,7 +335,8 @@ class MainScreen(Screen):
     @work(thread=True)
     def load_data(self) -> None:
         repos = load_repos()
-        all_worktrees = list_all_worktrees(repos)
+        hidden = load_hidden_worktrees()
+        all_worktrees = list_all_worktrees(repos, hidden)
         projects = load_projects()
 
         try:
@@ -560,10 +565,17 @@ class MainScreen(Screen):
     def _do_close_worktree(self, wt_data: WorktreeNodeData) -> None:
         wt = wt_data.worktree
         try:
-            if wt_data.project_name:
-                remove_worktree_from_project(wt_data.project_name, str(wt.path))
-            remove_worktree(wt.path)
-            self.notify(f"Removed worktree {wt.branch}")
+            if is_main_worktree(wt):
+                # Can't remove main worktree — hide it instead
+                hide_worktree(str(wt.path))
+                if wt_data.project_name:
+                    remove_worktree_from_project(wt_data.project_name, str(wt.path))
+                self.notify(f"Hidden worktree {wt.branch}")
+            else:
+                if wt_data.project_name:
+                    remove_worktree_from_project(wt_data.project_name, str(wt.path))
+                remove_worktree(wt.path)
+                self.notify(f"Removed worktree {wt.branch}")
             self.load_data()
         except RuntimeError as e:
             self.notify(str(e), severity="error")

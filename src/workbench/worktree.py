@@ -71,14 +71,22 @@ def list_worktrees_for_repo(repo_path: Path) -> list[WorktreeInfo]:
     return worktrees
 
 
-def list_all_worktrees(repo_paths: list[str]) -> list[WorktreeInfo]:
-    """List worktrees across all known repos."""
+def list_all_worktrees(repo_paths: list[str], hidden: set[str] | None = None) -> list[WorktreeInfo]:
+    """List worktrees across all known repos, excluding hidden ones."""
     all_wts: list[WorktreeInfo] = []
     for repo in repo_paths:
         repo_path = Path(repo)
         if repo_path.exists():
             all_wts.extend(list_worktrees_for_repo(repo_path))
-    return [wt for wt in all_wts if not wt.is_bare]
+    result = [wt for wt in all_wts if not wt.is_bare]
+    if hidden:
+        result = [wt for wt in result if str(wt.path) not in hidden]
+    return result
+
+
+def is_main_worktree(wt: WorktreeInfo) -> bool:
+    """Check if this is the repo's main worktree (not removable by git)."""
+    return wt.path.resolve() == wt.repo.resolve()
 
 
 def create_worktree(repo_path: Path, branch_name: str, base: str = "HEAD") -> WorktreeInfo:
