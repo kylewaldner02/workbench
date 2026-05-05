@@ -6,8 +6,7 @@ tell application "Terminal"
     set found to false
     repeat with w in windows
         repeat with t in tabs of w
-            set tabProcesses to processes of t
-            if tabProcesses contains "workbench" then
+            if name of t contains "workbench-tui" then
                 set selected tab of w to t
                 set frontmost of w to true
                 activate
