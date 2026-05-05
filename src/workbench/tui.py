@@ -246,12 +246,29 @@ class MainScreen(Screen):
     ]
 
     pr_cache: dict[str, PR] = {}
+    _last_cursor_line: int = 0
 
     def _on_tree_cursor_changed(self) -> None:
         """Re-evaluate binding states when cursor moves."""
         self.refresh_bindings()
 
     def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
+        # Skip session header nodes — they're display-only
+        node = event.node
+        if isinstance(node.data, SessionHeaderData):
+            tree = self.query_one("#main-tree", Tree)
+            going_down = tree.cursor_line >= self._last_cursor_line
+            if going_down and node.next_sibling:
+                tree.select_node(node.next_sibling)
+            else:
+                # Move up past the header — go to the line above it
+                header_line = tree.cursor_line
+                if header_line > 0:
+                    tree.move_cursor_to_line(header_line - 1)
+            self._last_cursor_line = tree.cursor_line
+            return
+
+        self._last_cursor_line = self.query_one("#main-tree", Tree).cursor_line
         self._on_tree_cursor_changed()
         try:
             self.query_one(WrappingFooter)._rebuild()
