@@ -32,11 +32,8 @@ from workbench.state import (
     unarchive_project,
 )
 from workbench.status import get_git_status, get_last_commit_time, has_unpushed_changes
-from workbench.tools.ai_agent import ClaudeCodeAgent
+from workbench.tools import create_tools
 from workbench.tools.base import PR
-from workbench.tools.ide import IntelliJIDE
-from workbench.tools.pr_viewer import GitHubCLIPR
-from workbench.tools.vcs_client import EmacsMagit
 from workbench.worktree import (
     WorktreeInfo,
     create_worktree,
@@ -46,11 +43,11 @@ from workbench.worktree import (
     remove_worktree,
 )
 
-# Tool instances (swap these for different implementations)
-ai_agent = ClaudeCodeAgent()
-ide = IntelliJIDE()
-vcs_client = EmacsMagit()
-pr_viewer = GitHubCLIPR()
+# Tool instances — initialized from config in WorkbenchApp.on_mount
+ai_agent = None
+ide = None
+vcs_client = None
+pr_viewer = None
 
 # Column widths for consistent alignment in tree labels
 COL_BRANCH = 24
@@ -970,6 +967,15 @@ class WorkbenchApp(App):
     exec_cwd: str | None = None
 
     def on_mount(self) -> None:
+        global ai_agent, ide, vcs_client, pr_viewer
+        from workbench.state import ensure_config
+        config = ensure_config()
+        tools = create_tools(config)
+        ai_agent = tools["ai_agent"]
+        ide = tools["ide"]
+        vcs_client = tools["vcs_client"]
+        pr_viewer = tools["pr_viewer"]
+
         try:
             from workbench.worktree import get_repo_root
             repo = get_repo_root()

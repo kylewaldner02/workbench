@@ -1,13 +1,36 @@
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 
 
-class EmacsMagit:
-    """Emacs Magit version control client via Emacs.app."""
+class EmacsOpen:
+    """Open directory in Emacs.app directly."""
 
     def open(self, worktree_path: Path) -> None:
         subprocess.Popen([
             "open", "-a", "Emacs", "--args", str(worktree_path),
         ])
+
+
+class EmacsMagit:
+    """Emacs Magit via emacsclient (requires Emacs server running)."""
+
+    def open(self, worktree_path: Path) -> None:
+        if not shutil.which("emacsclient"):
+            raise RuntimeError("emacsclient not found — add it to PATH or switch to 'emacs-open' in config")
+        subprocess.Popen([
+            "emacsclient",
+            "-e",
+            f'(magit-status "{worktree_path}")',
+        ])
+
+
+class LazyGit:
+    """lazygit terminal UI."""
+
+    def open(self, worktree_path: Path) -> None:
+        if not shutil.which("lazygit"):
+            raise RuntimeError("lazygit not found — install it or switch VCS client in config")
+        subprocess.Popen(["lazygit"], cwd=worktree_path)

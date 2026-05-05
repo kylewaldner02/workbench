@@ -10,6 +10,14 @@ PROJECTS_FILE = LOCAL_STATE_DIR / "projects.json"
 REPOS_FILE = LOCAL_STATE_DIR / "repos.json"
 FOLD_STATE_FILE = LOCAL_STATE_DIR / "fold_state.json"
 HIDDEN_WORKTREES_FILE = LOCAL_STATE_DIR / "hidden_worktrees.json"
+CONFIG_FILE = STATE_DIR / "config.json"
+
+DEFAULT_CONFIG = {
+    "ide": "intellij",
+    "vcs_client": "emacs-open",
+    "ai_agent": "claude-code",
+    "pr_viewer": "github",
+}
 
 
 @dataclass
@@ -240,3 +248,29 @@ def unhide_worktree(worktree_path: str) -> None:
     hidden = load_hidden_worktrees()
     hidden.discard(worktree_path)
     save_hidden_worktrees(hidden)
+
+
+# --- Config ---
+
+
+def load_config() -> dict:
+    config = dict(DEFAULT_CONFIG)
+    if CONFIG_FILE.exists():
+        try:
+            user = json.loads(CONFIG_FILE.read_text())
+            config.update(user)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return config
+
+
+def save_config(config: dict) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n")
+
+
+def ensure_config() -> dict:
+    """Load config, creating the file with defaults if it doesn't exist."""
+    if not CONFIG_FILE.exists():
+        save_config(DEFAULT_CONFIG)
+    return load_config()
