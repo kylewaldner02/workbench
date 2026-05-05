@@ -236,6 +236,7 @@ class MainScreen(Screen):
         Binding("x", "close_worktree", "Close WT"),
         Binding("n", "new_worktree", "New WT"),
         Binding("P", "new_project", "New Project"),
+        Binding("R", "add_repo", "Add Repo"),
         Binding("A", "archive_project", "Archive"),
         Binding("a", "assign_to_project", "Assign"),
         Binding("d", "view_archived", "Archived"),
@@ -594,6 +595,8 @@ class MainScreen(Screen):
     def action_new_project(self) -> None:
         self.app.push_screen(NewProjectScreen())
 
+    def action_add_repo(self) -> None:
+        self.app.push_screen(AddRepoScreen())
 
     def action_archive_project(self) -> None:
         proj_data = self._selected_project_data()
@@ -692,6 +695,36 @@ class NewWorktreeScreen(Screen):
             self.app.pop_screen()
         except RuntimeError as e:
             self.notify(str(e), severity="error")
+
+    def action_cancel(self) -> None:
+        self.app.pop_screen()
+
+
+class AddRepoScreen(Screen):
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("ctrl+n", "focus_next", show=False),
+        Binding("ctrl+p", "focus_previous", show=False),
+    ]
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Label("Add repo — enter path:"),
+            Input(id="repo-path-input", placeholder="/path/to/repo"),
+        )
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        path = event.value.strip()
+        if not path:
+            self.notify("Path cannot be empty", severity="error")
+            return
+        resolved = Path(path).expanduser().resolve()
+        if not (resolved / ".git").exists():
+            self.notify(f"Not a git repo: {resolved}", severity="error")
+            return
+        add_repo(str(resolved))
+        self.notify(f"Added repo: {resolved}")
+        self.app.pop_screen()
 
     def action_cancel(self) -> None:
         self.app.pop_screen()
