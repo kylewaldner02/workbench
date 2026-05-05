@@ -20,11 +20,13 @@ class EmacsMagit:
     def open(self, worktree_path: Path) -> None:
         if not shutil.which("emacsclient"):
             raise RuntimeError("emacsclient not found — add it to PATH or switch to 'emacs-open' in config")
-        subprocess.Popen([
-            "emacsclient",
-            "-e",
-            f'(magit-status "{worktree_path}")',
-        ])
+        elisp = (
+            f'(progn'
+            f'  (magit-status "{worktree_path}")'
+            f'  (select-frame-set-input-focus (selected-frame)))'
+        )
+        subprocess.Popen(["emacsclient", "-e", elisp])
+        subprocess.Popen(["open", "-a", "Emacs"])
 
 
 class LazyGit:
