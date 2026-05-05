@@ -239,6 +239,13 @@ class MainScreen(Screen):
         self.load_data()
         self.set_interval(5, self.load_data)
 
+    def on_screen_resume(self) -> None:
+        self.load_data()
+        try:
+            self.query_one(WrappingFooter)._rebuild()
+        except Exception:
+            pass
+
     @work(thread=True)
     def load_data(self) -> None:
         repos = load_repos()
@@ -480,6 +487,10 @@ class SessionListScreen(Screen):
         table = self.query_one("#session-table", DataTable)
         table.cursor_type = "row"
         table.add_columns("Session", "Status", "Last Active")
+        try:
+            self.query_one(WrappingFooter)._rebuild()
+        except Exception:
+            pass
 
         for s in self.sessions:
             status = "● active" if s.is_active else "○ idle"
@@ -530,8 +541,15 @@ class NewWorktreeScreen(Screen):
         repos = load_repos()
         repo_options = [(Path(r).name, r) for r in repos]
 
+        projects = load_projects()
+        project_options: list[tuple[str, str]] = [("(no project)", "__none__")]
+        project_options.extend((p.name, p.name) for p in projects)
+        default_project = self.project_name if self.project_name else "__none__"
+
         yield Vertical(
             Label("New worktree"),
+            Label("Project:"),
+            Select(project_options, id="project-select", value=default_project),
             Label("Repo:"),
             Select(repo_options, id="repo-select", prompt="Select a repo"),
             Label("Branch name:"),
@@ -550,11 +568,16 @@ class NewWorktreeScreen(Screen):
             self.notify("Select a repo first", severity="error")
             return
 
+        project_select = self.query_one("#project-select", Select)
+        project_name = None
+        if project_select.value not in (Select.BLANK, "__none__"):
+            project_name = str(project_select.value)
+
         repo_path = Path(str(select.value))
         try:
             wt = create_worktree(repo_path, branch)
-            if self.project_name:
-                add_worktree_to_project(self.project_name, str(repo_path), branch, str(wt.path))
+            if project_name:
+                add_worktree_to_project(project_name, str(repo_path), branch, str(wt.path))
             self.notify(f"Created worktree for {branch}")
             self.app.pop_screen()
         except RuntimeError as e:
@@ -662,6 +685,7 @@ class ArchivedProjectsScreen(Screen):
         Binding("X", "delete_project", "Delete"),
         Binding("escape", "go_back", "Back"),
         Binding("backspace", "go_back", "Back"),
+        Binding("q", "quit", "Quit"),
     ]
 
     def compose(self) -> ComposeResult:
@@ -674,6 +698,16 @@ class ArchivedProjectsScreen(Screen):
         table.cursor_type = "row"
         table.add_columns("Project", "Worktrees")
         self._load()
+        self._refresh_footer()
+
+    def on_screen_resume(self) -> None:
+        self._refresh_footer()
+
+    def _refresh_footer(self) -> None:
+        try:
+            self.query_one(WrappingFooter)._rebuild()
+        except Exception:
+            pass
 
     def _load(self) -> None:
         table = self.query_one("#archived-table", DataTable)
@@ -710,6 +744,9 @@ class ArchivedProjectsScreen(Screen):
     def action_go_back(self) -> None:
         self.app.pop_screen()
 
+    def action_quit(self) -> None:
+        self.app.exit()
+
 
 class WorkbenchApp(App):
     COMMANDS = set()
@@ -741,6 +778,13 @@ class WorkbenchApp(App):
     }
     #new-wt-form {
         padding: 1 2;
+    }
+    #archived-header {
+        padding: 1;
+        text-style: bold;
+    }
+    ToastRack {
+        margin-bottom: 3;
     }
     """
 
