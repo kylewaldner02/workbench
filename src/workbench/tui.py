@@ -470,6 +470,8 @@ class SessionListScreen(Screen):
         Binding("c", "new_session", "New"),
         Binding("escape", "go_back", "Back"),
         Binding("backspace", "go_back", "Back"),
+        Binding("ctrl+n", "focus_next", show=False),
+        Binding("ctrl+p", "focus_previous", show=False),
     ]
 
     def __init__(self, worktree: WorktreeInfo) -> None:
@@ -531,6 +533,8 @@ class SessionListScreen(Screen):
 class NewWorktreeScreen(Screen):
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
+        Binding("ctrl+n", "focus_next", show=False),
+        Binding("ctrl+p", "focus_previous", show=False),
     ]
 
     def __init__(self, project_name: str | None = None) -> None:
@@ -590,6 +594,8 @@ class NewWorktreeScreen(Screen):
 class NewProjectScreen(Screen):
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
+        Binding("ctrl+n", "focus_next", show=False),
+        Binding("ctrl+p", "focus_previous", show=False),
     ]
 
     def compose(self) -> ComposeResult:
@@ -617,6 +623,8 @@ class NewProjectScreen(Screen):
 class AssignToProjectScreen(Screen):
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
+        Binding("ctrl+n", "focus_next", show=False),
+        Binding("ctrl+p", "focus_previous", show=False),
     ]
 
     def __init__(self, worktree: WorktreeInfo) -> None:
@@ -654,6 +662,8 @@ class AssignToProjectScreen(Screen):
 class CreatePRScreen(Screen):
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
+        Binding("ctrl+n", "focus_next", show=False),
+        Binding("ctrl+p", "focus_previous", show=False),
     ]
 
     def __init__(self, worktree: WorktreeInfo) -> None:
@@ -686,6 +696,8 @@ class ArchivedProjectsScreen(Screen):
         Binding("escape", "go_back", "Back"),
         Binding("backspace", "go_back", "Back"),
         Binding("q", "quit", "Quit"),
+        Binding("ctrl+n", "focus_next", show=False),
+        Binding("ctrl+p", "focus_previous", show=False),
     ]
 
     def compose(self) -> ComposeResult:
