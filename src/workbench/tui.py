@@ -274,6 +274,12 @@ class MainScreen(Screen):
         except Exception:
             pass
 
+    def on_tree_node_expanded(self, event: Tree.NodeExpanded) -> None:
+        self._save_fold_state()
+
+    def on_tree_node_collapsed(self, event: Tree.NodeCollapsed) -> None:
+        self._save_fold_state()
+
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         node = self._selected_node()
         on_session = node is not None and isinstance(node.data, SessionNodeData)
@@ -480,17 +486,14 @@ class MainScreen(Screen):
             return
         if isinstance(node.data, WorktreeNodeData):
             node.toggle()
-            self._save_fold_state()
         elif isinstance(node.data, ProjectNodeData):
             node.toggle()
-            self._save_fold_state()
         elif isinstance(node.data, SessionNodeData):
             # Leaf: navigate to parent worktree
             if node.parent:
                 tree = self.query_one("#main-tree", Tree)
                 node.parent.collapse()
                 tree.select_node(node.parent)
-                self._save_fold_state()
 
     def action_resume_session(self) -> None:
         node = self._selected_node()
@@ -605,12 +608,12 @@ class MainScreen(Screen):
 
     def action_cursor_expand(self) -> None:
         node = self._selected_node()
-        if node and isinstance(node.data, ProjectNodeData):
+        if node and isinstance(node.data, (ProjectNodeData, WorktreeNodeData)):
             node.expand()
 
     def action_cursor_collapse(self) -> None:
         node = self._selected_node()
-        if node and isinstance(node.data, ProjectNodeData):
+        if node and isinstance(node.data, (ProjectNodeData, WorktreeNodeData)):
             node.collapse()
 
     def action_refresh(self) -> None:
