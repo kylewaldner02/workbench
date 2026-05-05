@@ -343,26 +343,16 @@ class MainScreen(Screen):
 
     def _rebuild_tree(self, all_worktrees: list[WorktreeInfo], projects: list) -> None:
         self._rebuilding = True
-        try:
-            self._do_rebuild_tree(all_worktrees, projects)
-        finally:
-            self._rebuilding = False
+        self._do_rebuild_tree(all_worktrees, projects)
+        # Defer clearing the flag so queued expand/collapse events are still suppressed
+        self.set_timer(0.1, self._end_rebuild)
+
+    def _end_rebuild(self) -> None:
+        self._rebuilding = False
 
     def _do_rebuild_tree(self, all_worktrees: list[WorktreeInfo], projects: list) -> None:
         tree = self.query_one("#main-tree", Tree)
-
-        # Capture live fold state before clearing
         fold = load_fold_state()
-        if tree.root.children:
-            for proj_node in tree.root.children:
-                if isinstance(proj_node.data, ProjectNodeData):
-                    key = f"project:{proj_node.data.project_name}"
-                    fold[key] = proj_node.is_expanded
-                for wt_node in proj_node.children:
-                    if isinstance(wt_node.data, WorktreeNodeData):
-                        key = f"worktree:{wt_node.data.worktree.path}"
-                        fold[key] = wt_node.is_expanded
-
         tree.root.remove_children()
 
         assigned_paths: set[str] = set()
