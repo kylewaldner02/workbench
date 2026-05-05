@@ -114,7 +114,6 @@ class WrappingFooter(Static):
 
     def on_mount(self) -> None:
         self._rebuild()
-        self.set_interval(0.5, self._rebuild)
 
     def _rebuild(self) -> None:
         try:
@@ -133,18 +132,43 @@ class WrappingFooter(Static):
             seen.add(binding.description)
             entries.append((binding.key, binding.description, active_binding.enabled))
 
-        label = Text()
-        for i, (key, desc, enabled) in enumerate(entries):
-            if i > 0:
-                label.append("  ")
-            if enabled:
-                label.append(key, style="bold cyan")
-                label.append(f" {desc}")
-            else:
-                label.append(key, style="dim")
-                label.append(f" {desc}", style="dim")
+        width = self.size.width or 80
+        gap = 2
+        lines: list[Text] = []
+        current = Text()
+        col = 0
 
-        self.update(label)
+        for key, desc, enabled in entries:
+            hint_len = len(key) + 1 + len(desc)  # "k desc"
+            needed = (gap if col > 0 else 0) + hint_len
+
+            if col > 0 and col + needed > width:
+                lines.append(current)
+                current = Text()
+                col = 0
+
+            if col > 0:
+                current.append("  ")
+                col += gap
+
+            if enabled:
+                current.append(key, style="bold cyan")
+                current.append(f" {desc}")
+            else:
+                current.append(key, style="dim")
+                current.append(f" {desc}", style="dim")
+            col += hint_len
+
+        if current.plain:
+            lines.append(current)
+
+        result = Text()
+        for i, line in enumerate(lines):
+            if i > 0:
+                result.append("\n")
+            result.append_text(line)
+
+        self.update(result)
 
 
 class MainScreen(Screen):
@@ -178,7 +202,7 @@ class MainScreen(Screen):
     def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
         self._on_tree_cursor_changed()
         try:
-            self.query_one(WrappingFooter).refresh()
+            self.query_one(WrappingFooter)._rebuild()
         except Exception:
             pass
 
