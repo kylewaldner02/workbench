@@ -438,20 +438,35 @@ class MainScreen(Screen):
         elif isinstance(node.data, ProjectNodeData):
             node.toggle()
         elif isinstance(node.data, SessionNodeData):
-            ai_agent.resume(node.data.worktree.path, node.data.session_id)
-            self.notify(f"Resumed session {node.data.session_id[:20]}...")
+            wt = node.data.worktree
+            cmd = ai_agent.resume_cmd(wt.path, node.data.session_id)
+            self.app.launch_agent(cmd, str(wt.path))
 
     def action_resume_session(self) -> None:
         node = self._selected_node()
         if node and isinstance(node.data, SessionNodeData):
-            ai_agent.resume(node.data.worktree.path, node.data.session_id)
-            self.notify(f"Resumed session {node.data.session_id[:20]}...")
+            wt = node.data.worktree
+            cmd = ai_agent.resume_cmd(wt.path, node.data.session_id)
+            self.app.launch_agent(cmd, str(wt.path))
 
     def action_open_claude(self) -> None:
         wt_data = self._selected_worktree_data()
-        if wt_data:
-            ai_agent.open(wt_data.worktree.path)
-            self.notify(f"Opened Claude Code in {wt_data.worktree.branch}")
+        if not wt_data:
+            return
+        wt = wt_data.worktree
+        # If on a session node, resume that session
+        node = self._selected_node()
+        if node and isinstance(node.data, SessionNodeData):
+            cmd = ai_agent.resume_cmd(wt.path, node.data.session_id)
+            self.app.launch_agent(cmd, str(wt.path))
+            return
+        # On a worktree node: resume most recent session, or open new
+        sessions = ai_agent.list_sessions(wt.path)
+        if sessions:
+            cmd = ai_agent.resume_cmd(wt.path, sessions[0].session_id)
+        else:
+            cmd = ai_agent.open_cmd(wt.path)
+        self.app.launch_agent(cmd, str(wt.path))
 
     def action_open_ide(self) -> None:
         wt_data = self._selected_worktree_data()
@@ -816,6 +831,9 @@ class WorkbenchApp(App):
     }
     """
 
+    exec_cmd: list[str] | None = None
+    exec_cwd: str | None = None
+
     def on_mount(self) -> None:
         try:
             from workbench.worktree import get_repo_root
@@ -824,3 +842,9 @@ class WorkbenchApp(App):
         except RuntimeError:
             pass
         self.push_screen(MainScreen())
+
+    def launch_agent(self, cmd: list[str], cwd: str) -> None:
+        """Store command and exit — CLI will exec into it."""
+        self.exec_cmd = cmd
+        self.exec_cwd = cwd
+        self.exit()

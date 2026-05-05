@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import typer
@@ -15,6 +16,11 @@ def main(ctx: typer.Context) -> None:
 
         wb = WorkbenchApp()
         wb.run()
+
+        # If the TUI set a command to exec into, do it
+        if wb.exec_cmd:
+            os.chdir(wb.exec_cwd or ".")
+            os.execvp(wb.exec_cmd[0], wb.exec_cmd)
 
 
 @app.command("add-repo")

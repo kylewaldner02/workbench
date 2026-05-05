@@ -13,43 +13,11 @@ class ClaudeCodeAgent:
 
     CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
-    def open(self, worktree_path: Path) -> None:
-        subprocess.Popen(["claude"], cwd=worktree_path)
+    def open_cmd(self, worktree_path: Path) -> list[str]:
+        return ["caffeinate", "-i", "claude"]
 
-    def resume(self, worktree_path: Path, session_id: str) -> None:
-        subprocess.Popen(["claude", "--resume", session_id], cwd=worktree_path)
-
-    def is_active(self, worktree_path: Path) -> bool:
-        try:
-            result = subprocess.run(
-                ["pgrep", "-f", "claude"],
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode != 0:
-                return False
-
-            for pid in result.stdout.strip().splitlines():
-                try:
-                    cwd_link = Path(f"/proc/{pid}/cwd").resolve()
-                    if str(cwd_link) == str(worktree_path.resolve()):
-                        return True
-                except (OSError, PermissionError):
-                    continue
-
-            # macOS fallback: use lsof to check cwd
-            lsof = subprocess.run(
-                ["lsof", "-a", "-d", "cwd", "-c", "claude", "-Fn"],
-                capture_output=True,
-                text=True,
-            )
-            wt = str(worktree_path.resolve())
-            for line in lsof.stdout.splitlines():
-                if line.startswith("n") and line[1:] == wt:
-                    return True
-        except FileNotFoundError:
-            pass
-        return False
+    def resume_cmd(self, worktree_path: Path, session_id: str) -> list[str]:
+        return ["caffeinate", "-i", "claude", "--resume", session_id]
 
     def list_sessions(self, worktree_path: Path) -> list[Session]:
         project_dir = self._find_project_dir(worktree_path)
