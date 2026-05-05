@@ -8,11 +8,21 @@ CLI worktree manager with integrated launchers for Claude Code, IntelliJ, and Em
 - Git
 - GitHub CLI (`gh`) — for PR integration
 
-## Setup
+## Install
 
 ```bash
 git clone git@github.com:kylewaldner02/workbench.git
 cd workbench
+pipx install .
+```
+
+This puts the `workbench` command on your PATH globally.
+
+### Development
+
+For local development with live code reloading:
+
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
