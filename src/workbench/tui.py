@@ -232,7 +232,6 @@ class MainScreen(Screen):
         Binding("x", "close_worktree", "Close WT"),
         Binding("n", "new_worktree", "New WT"),
         Binding("P", "new_project", "New Project"),
-        Binding("X", "delete_project", "Del Project"),
         Binding("A", "archive_project", "Archive"),
         Binding("a", "assign_to_project", "Assign"),
         Binding("d", "view_archived", "Archived"),
@@ -285,7 +284,7 @@ class MainScreen(Screen):
             "open_claude", "open_ide", "open_git", "open_pr",
             "close_worktree", "assign_to_project",
         }
-        project_actions = {"delete_project", "archive_project"}
+        project_actions = {"archive_project"}
         session_actions = {"resume_session", "fork_session"}
 
         if action in session_actions:
@@ -569,12 +568,6 @@ class MainScreen(Screen):
     def action_new_project(self) -> None:
         self.app.push_screen(NewProjectScreen())
 
-    def action_delete_project(self) -> None:
-        proj_data = self._selected_project_data()
-        if proj_data and proj_data.project_name:
-            delete_project(proj_data.project_name)
-            self.notify(f"Deleted project {proj_data.project_name}")
-            self.load_data()
 
     def action_archive_project(self) -> None:
         proj_data = self._selected_project_data()
