@@ -68,6 +68,19 @@ class ProjectNodeData:
     project_name: str | None  # None = No Project
 
 
+@dataclass
+class SessionNodeData:
+    """Data attached to a session tree node."""
+    session_id: str
+    worktree: WorktreeInfo
+
+
+@dataclass
+class SessionHeaderData:
+    """Non-interactive header row for session columns."""
+    pass
+
+
 def _format_worktree_label(
     wt: WorktreeInfo,
     pr_cache: dict[str, PR],
@@ -108,6 +121,32 @@ def _format_header_label() -> Text:
     label.append(f"{'Sessions':<{COL_SESSIONS}}", style="bold dim")
     label.append(f"{'PR':<{COL_PR}}", style="bold dim")
     label.append("Last Commit", style="bold dim")
+    return label
+
+
+# Session sub-columns
+COL_SESSION_LABEL = 40
+COL_SESSION_STATUS = 12
+COL_SESSION_ACTIVE = 14
+
+
+def _format_session_header() -> Text:
+    label = Text()
+    label.append(f"{'Session':<{COL_SESSION_LABEL}}", style="bold dim")
+    label.append(f"{'Status':<{COL_SESSION_STATUS}}", style="bold dim")
+    label.append("Last Active", style="bold dim")
+    return label
+
+
+def _format_session_label(session) -> Text:
+    label = Text()
+    label.append(f"{session.label:<{COL_SESSION_LABEL}}")
+    status = "● active" if session.is_active else "○ idle"
+    if session.is_active:
+        label.append(f"{status:<{COL_SESSION_STATUS}}", style="green")
+    else:
+        label.append(f"{status:<{COL_SESSION_STATUS}}", style="dim")
+    label.append(session.last_active, style="dim")
     return label
 
 
@@ -183,12 +222,13 @@ class WrappingFooter(Static):
 
 class MainScreen(Screen):
     BINDINGS = [
-        Binding("enter", "drill_down", "Sessions"),
-        Binding("tab", "drill_down", "Sessions", show=False),
+        Binding("enter", "drill_down", "Expand"),
+        Binding("tab", "drill_down", "Expand", show=False),
         Binding("c", "open_claude", "Claude"),
         Binding("i", "open_ide", "IDE"),
         Binding("g", "open_git", "Git"),
         Binding("p", "open_pr", "PR"),
+        Binding("s", "resume_session", "Resume"),
         Binding("x", "close_worktree", "Close WT"),
         Binding("n", "new_worktree", "New WT"),
         Binding("P", "new_project", "New Project"),
@@ -225,12 +265,16 @@ class MainScreen(Screen):
             "close_worktree", "assign_to_project",
         }
         project_actions = {"delete_project", "archive_project"}
+        session_actions = {"resume_session"}
 
         if action in worktree_actions:
             return self._selected_worktree_data() is not None
         if action in project_actions:
             proj = self._selected_project_data()
             return proj is not None and proj.project_name is not None
+        if action in session_actions:
+            node = self._selected_node()
+            return node is not None and isinstance(node.data, SessionNodeData)
         return True
 
     def compose(self) -> ComposeResult:
@@ -269,11 +313,15 @@ class MainScreen(Screen):
     def _rebuild_tree(self, all_worktrees: list[WorktreeInfo], projects: list) -> None:
         tree = self.query_one("#main-tree", Tree)
 
-        # Remember which projects were expanded
-        expanded: set[str | None] = set()
-        for node in tree.root.children:
-            if node.is_expanded and hasattr(node, "data") and isinstance(node.data, ProjectNodeData):
-                expanded.add(node.data.project_name)
+        # Remember which projects and worktrees were expanded
+        expanded_projects: set[str | None] = set()
+        expanded_worktrees: set[str] = set()
+        for proj_node in tree.root.children:
+            if proj_node.is_expanded and isinstance(proj_node.data, ProjectNodeData):
+                expanded_projects.add(proj_node.data.project_name)
+            for wt_node in proj_node.children:
+                if wt_node.is_expanded and isinstance(wt_node.data, WorktreeNodeData):
+                    expanded_worktrees.add(str(wt_node.data.worktree.path))
 
         tree.root.remove_children()
 
@@ -292,14 +340,10 @@ class MainScreen(Screen):
                 matching = [wt for wt in all_worktrees if str(wt.path) == pw.worktree_path]
                 if matching:
                     wt = matching[0]
-                    label = _format_worktree_label(wt, self.pr_cache)
-                    project_node.add_leaf(
-                        label,
-                        data=WorktreeNodeData(worktree=wt, project_name=project.name),
-                    )
+                    self._add_worktree_node(project_node, wt, project.name, expanded_worktrees)
 
             # Restore expand state, default to expanded
-            if project.name in expanded or project.name not in expanded and not expanded:
+            if project.name in expanded_projects or not expanded_projects:
                 project_node.expand()
             else:
                 project_node.collapse()
@@ -314,16 +358,41 @@ class MainScreen(Screen):
                 data=ProjectNodeData(project_name=None),
             )
             for wt in unassigned:
-                label = _format_worktree_label(wt, self.pr_cache)
-                unassigned_node.add_leaf(
-                    label,
-                    data=WorktreeNodeData(worktree=wt, project_name=None),
-                )
+                self._add_worktree_node(unassigned_node, wt, None, expanded_worktrees)
 
-            if None in expanded or not expanded:
+            if None in expanded_projects or not expanded_projects:
                 unassigned_node.expand()
             else:
                 unassigned_node.collapse()
+
+    def _add_worktree_node(
+        self,
+        parent_node: TreeNode,
+        wt: WorktreeInfo,
+        project_name: str | None,
+        expanded_worktrees: set[str],
+    ) -> None:
+        label = _format_worktree_label(wt, self.pr_cache)
+        wt_node = parent_node.add(
+            label,
+            data=WorktreeNodeData(worktree=wt, project_name=project_name),
+        )
+
+        # Add session children
+        sessions = ai_agent.list_sessions(wt.path)
+        if sessions:
+            wt_node.add_leaf(_format_session_header(), data=SessionHeaderData())
+            for s in sessions:
+                wt_node.add_leaf(
+                    _format_session_label(s),
+                    data=SessionNodeData(session_id=s.session_id, worktree=wt),
+                )
+
+        # Restore expand state — collapsed by default
+        if str(wt.path) in expanded_worktrees:
+            wt_node.expand()
+        else:
+            wt_node.collapse()
 
         # Move cursor to first worktree node if nothing selected
         if tree.cursor_node is None or tree.cursor_node is tree.root:
@@ -347,6 +416,11 @@ class MainScreen(Screen):
         node = self._selected_node()
         if node and isinstance(node.data, WorktreeNodeData):
             return node.data
+        # If on a session node, return the parent worktree
+        if node and isinstance(node.data, (SessionNodeData, SessionHeaderData)):
+            parent = node.parent
+            if parent and isinstance(parent.data, WorktreeNodeData):
+                return parent.data
         return None
 
     def _selected_project_data(self) -> ProjectNodeData | None:
@@ -356,14 +430,22 @@ class MainScreen(Screen):
         return None
 
     def action_drill_down(self) -> None:
-        wt_data = self._selected_worktree_data()
-        if wt_data:
-            self.app.push_screen(SessionListScreen(wt_data.worktree))
-            return
-        # If on a project node, toggle expand/collapse
         node = self._selected_node()
-        if node and isinstance(node.data, ProjectNodeData):
+        if not node:
+            return
+        if isinstance(node.data, WorktreeNodeData):
             node.toggle()
+        elif isinstance(node.data, ProjectNodeData):
+            node.toggle()
+        elif isinstance(node.data, SessionNodeData):
+            ai_agent.resume(node.data.worktree.path, node.data.session_id)
+            self.notify(f"Resumed session {node.data.session_id[:20]}...")
+
+    def action_resume_session(self) -> None:
+        node = self._selected_node()
+        if node and isinstance(node.data, SessionNodeData):
+            ai_agent.resume(node.data.worktree.path, node.data.session_id)
+            self.notify(f"Resumed session {node.data.session_id[:20]}...")
 
     def action_open_claude(self) -> None:
         wt_data = self._selected_worktree_data()
@@ -469,72 +551,6 @@ class MainScreen(Screen):
     def action_quit(self) -> None:
         self.app.exit()
 
-
-class SessionListScreen(Screen):
-    BINDINGS = [
-        Binding("r", "resume_session", "Resume"),
-        Binding("f", "fork_session", "Fork"),
-        Binding("c", "new_session", "New"),
-        Binding("escape", "go_back", "Back"),
-        Binding("backspace", "go_back", "Back"),
-        Binding("ctrl+n", "focus_next", show=False),
-        Binding("ctrl+p", "focus_previous", show=False),
-    ]
-
-    def __init__(self, worktree: WorktreeInfo) -> None:
-        super().__init__()
-        self.worktree = worktree
-        self.sessions = ai_agent.list_sessions(worktree.path)
-
-    def compose(self) -> ComposeResult:
-        yield Header()
-        yield Label(f" Sessions for {self.worktree.branch}", id="session-header")
-        yield DataTable(id="session-table")
-        yield WrappingFooter()
-
-    def on_mount(self) -> None:
-        table = self.query_one("#session-table", DataTable)
-        table.cursor_type = "row"
-        table.add_columns("Session", "Status", "Last Active")
-        try:
-            self.query_one(WrappingFooter)._rebuild()
-        except Exception:
-            pass
-
-        for s in self.sessions:
-            status = "● active" if s.is_active else "○ idle"
-            table.add_row(s.label, status, s.last_active)
-
-        if not self.sessions:
-            self.notify("No sessions found for this worktree")
-
-    def _selected_session_id(self) -> str | None:
-        table = self.query_one("#session-table", DataTable)
-        if not self.sessions:
-            return None
-        row = table.cursor_row
-        if 0 <= row < len(self.sessions):
-            return self.sessions[row].session_id
-        return None
-
-    def action_resume_session(self) -> None:
-        sid = self._selected_session_id()
-        if sid:
-            ai_agent.resume(self.worktree.path, sid)
-            self.notify(f"Resumed session {sid[:20]}...")
-
-    def action_fork_session(self) -> None:
-        sid = self._selected_session_id()
-        if sid:
-            ai_agent.resume(self.worktree.path, sid)
-            self.notify(f"Forked session {sid[:20]}... (diverge from here)")
-
-    def action_new_session(self) -> None:
-        ai_agent.open(self.worktree.path)
-        self.notify(f"Started new Claude session in {self.worktree.branch}")
-
-    def action_go_back(self) -> None:
-        self.app.pop_screen()
 
 
 class NewWorktreeScreen(Screen):
@@ -780,13 +796,6 @@ class WorkbenchApp(App):
         padding: 0 0 0 6;
         background: $surface;
         color: $text-muted;
-    }
-    #session-table {
-        height: 1fr;
-    }
-    #session-header {
-        padding: 1;
-        text-style: bold;
     }
     #status-bar {
         height: 1;
