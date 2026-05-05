@@ -14,6 +14,7 @@ from textual.containers import Vertical
 from textual.screen import Screen
 from textual.widget import Widget
 from textual.widgets import DataTable, Header, Input, Label, Select, Static, Tree
+from textual.events import Key
 from textual.widgets.tree import TreeNode
 
 from workbench.state import (
@@ -189,6 +190,11 @@ class WrappingFooter(Static):
         self._rebuild()
 
     def _rebuild(self) -> None:
+        screen = self.screen
+        if isinstance(screen, MainScreen) and screen._jumper_phase > 0:
+            self._rebuild_jumper(screen._jumper_phase)
+            return
+
         try:
             active = self.app.active_bindings
         except Exception:
@@ -243,11 +249,37 @@ class WrappingFooter(Static):
 
         self.update(result)
 
+    def _rebuild_jumper(self, phase: int) -> None:
+        result = Text()
+        if phase == 1:
+            result.append("JUMP ", style="bold cyan")
+            result.append("type first char of target line  ")
+            result.append("esc", style="bold cyan")
+            result.append(" cancel")
+        elif phase == 2:
+            result.append("JUMP ", style="bold cyan")
+            result.append("type hint letter to jump  ")
+            result.append("esc", style="bold cyan")
+            result.append(" cancel")
+        self.update(result)
+
+
+class WorkbenchTree(Tree):
+    """Tree that redirects space to jumper mode instead of toggle."""
+
+    def action_toggle_node(self) -> None:
+        screen = self.screen
+        if isinstance(screen, MainScreen):
+            screen.action_enter_jumper_mode()
+        else:
+            super().action_toggle_node()
+
 
 class MainScreen(Screen):
     BINDINGS = [
         Binding("enter", "drill_down", "Expand"),
         Binding("tab", "drill_down", "Expand", show=False),
+        Binding("space", "enter_jumper_mode", "Jump"),
         Binding("c", "open_claude_new_window", "Claude"),
         Binding("C", "open_claude", "Claude (same term)"),
         Binding("o", "new_session_new_window", "New Session"),
@@ -275,12 +307,17 @@ class MainScreen(Screen):
         Binding("ctrl+b", "cursor_collapse", "Collapse", show=False),
     ]
 
+    JUMPER_KEYS = "asdfghjkl"
+
     pr_cache: dict[str, PR] = {}
     _last_cursor_line: int = 0
     _rebuilding: bool = False
     _fold_cache: dict[str, bool] | None = None
     _fold_dirty: bool = False
     _fold_flush_timer = None
+    _jumper_phase: int = 0  # 0=off, 1=waiting for char, 2=showing hints
+    _jumper_candidates: list[TreeNode] = []
+    _jumper_saved_labels: list[tuple[TreeNode, Text | str]] = []
 
     def _on_tree_cursor_changed(self) -> None:
         """Re-evaluate binding states when cursor moves."""
@@ -333,6 +370,8 @@ class MainScreen(Screen):
             self._save_fold_state()
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self._jumper_phase > 0:
+            return False
         node = self._selected_node()
         on_session = node is not None and isinstance(node.data, SessionNodeData)
         on_project = node is not None and isinstance(node.data, ProjectNodeData)
@@ -364,7 +403,7 @@ class MainScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Static(_format_header_label(), id="col-header")
-        tree: Tree[WorktreeNodeData | ProjectNodeData] = Tree("workbench", id="main-tree")
+        tree: WorkbenchTree[WorktreeNodeData | ProjectNodeData] = WorkbenchTree("workbench", id="main-tree")
         tree.show_root = False
         tree.guide_depth = 3
         yield tree
@@ -384,6 +423,8 @@ class MainScreen(Screen):
 
     @work(thread=True)
     def load_data(self) -> None:
+        if self._jumper_phase > 0:
+            return
         repos = load_repos()
         hidden = load_hidden_worktrees()
         all_worktrees = list_all_worktrees(repos, hidden)
@@ -470,9 +511,10 @@ class MainScreen(Screen):
                     tree.select_node(node)
                     break
 
-        # Update status bar
-        status = self.query_one("#status-bar", Static)
-        status.update(f" {len(projects)} projects · {len(all_worktrees)} worktrees")
+        # Update status bar (skip during jumper mode)
+        if self._jumper_phase == 0:
+            status = self.query_one("#status-bar", Static)
+            status.update(f" {len(projects)} projects · {len(all_worktrees)} worktrees")
 
     def _add_worktree_node(
         self,
@@ -744,6 +786,128 @@ class MainScreen(Screen):
 
     def action_refresh(self) -> None:
         self.load_data()
+
+    # ── Jumper mode ──────────────────────────────────────────────
+    def _visible_nodes(self) -> list[TreeNode]:
+        """Return expanded, non-root tree nodes in display order."""
+        nodes: list[TreeNode] = []
+        tree = self.query_one("#main-tree", Tree)
+
+        def walk(node: TreeNode) -> None:
+            for child in node.children:
+                if isinstance(child.data, SessionHeaderData):
+                    continue
+                nodes.append(child)
+                if child.is_expanded:
+                    walk(child)
+
+        walk(tree.root)
+        return nodes
+
+    def action_enter_jumper_mode(self) -> None:
+        self._jumper_phase = 1
+        self._rebuild_footer()
+
+    def _jumper_show_hints(self, candidates: list[TreeNode]) -> None:
+        """Replace labels on candidate nodes with hint keys."""
+        self._jumper_saved_labels = []
+        self._jumper_candidates = []
+        keys = self.JUMPER_KEYS
+        for i, node in enumerate(candidates[: len(keys)]):
+            self._jumper_saved_labels.append((node, node.label))
+            hint_char = keys[i]
+            original_text = node.label.plain if isinstance(node.label, Text) else str(node.label)
+            label = Text()
+            label.append(hint_char, style="bold reverse cyan")
+            label.append(" ")
+            label.append(original_text)
+            node.set_label(label)
+            self._jumper_candidates.append(node)
+        self._jumper_phase = 2
+
+    def _jumper_restore_labels(self) -> None:
+        """Restore original labels on all hinted nodes."""
+        for node, original_label in self._jumper_saved_labels:
+            node.set_label(original_label)
+        self._jumper_saved_labels = []
+        self._jumper_candidates = []
+
+    def _rebuild_footer(self) -> None:
+        try:
+            self.query_one(WrappingFooter)._rebuild()
+        except Exception:
+            pass
+
+    def _jumper_cancel(self) -> None:
+        self._jumper_restore_labels()
+        self._jumper_phase = 0
+        self._rebuild_footer()
+
+    def on_key(self, event: Key) -> None:
+        if self._jumper_phase > 0:
+            event.prevent_default()
+            event.stop()
+            self._handle_jumper_key(event)
+
+    def _handle_jumper_key(self, event: Key) -> None:
+        if event.key == "escape":
+            self._jumper_cancel()
+            return
+
+        if self._jumper_phase == 1:
+            # Phase 1: user types a character to filter visible nodes
+            char = event.character
+            if not char or not char.isprintable():
+                self._jumper_cancel()
+                return
+
+            visible = self._visible_nodes()
+            matches = []
+            for node in visible:
+                label_text = node.label.plain if isinstance(node.label, Text) else str(node.label)
+                # Match against first non-whitespace character
+                stripped = label_text.lstrip()
+                if stripped and stripped[0].lower() == char.lower():
+                    matches.append(node)
+
+            if not matches:
+                self.notify(f"No lines starting with '{char}'", severity="warning")
+                self._jumper_cancel()
+                return
+
+            if len(matches) == 1:
+                # Only one match — jump directly
+                tree = self.query_one("#main-tree", Tree)
+                tree.move_cursor(matches[0])
+                self._jumper_phase = 0
+                self._rebuild_footer()
+                return
+
+            self._jumper_show_hints(matches)
+            self._rebuild_footer()
+            return
+
+        if self._jumper_phase == 2:
+            # Phase 2: user types a hint key to select
+            char = event.character
+            if not char:
+                self._jumper_cancel()
+                return
+
+            keys = self.JUMPER_KEYS
+            if char.lower() in keys:
+                idx = keys.index(char.lower())
+                if idx < len(self._jumper_candidates):
+                    target = self._jumper_candidates[idx]
+                    self._jumper_restore_labels()
+                    tree = self.query_one("#main-tree", Tree)
+                    tree.move_cursor(target)
+                    self._jumper_phase = 0
+                    self._rebuild_footer()
+                    return
+
+            # Invalid hint key
+            self._jumper_cancel()
 
     def action_quit(self) -> None:
         self._flush_fold_state()
