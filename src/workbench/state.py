@@ -7,6 +7,7 @@ from pathlib import Path
 STATE_DIR = Path.home() / ".workbench"
 PROJECTS_FILE = STATE_DIR / "projects.json"
 REPOS_FILE = STATE_DIR / "repos.json"
+FOLD_STATE_FILE = STATE_DIR / "fold_state.json"
 
 
 @dataclass
@@ -188,3 +189,21 @@ def remove_repo(repo_path: str) -> None:
     resolved = str(Path(repo_path).resolve())
     repos = [r for r in repos if r != resolved]
     save_repos(repos)
+
+
+# --- Fold State ---
+
+
+def load_fold_state() -> dict[str, bool]:
+    """Load fold state. Keys are node identifiers, values are True=expanded."""
+    if not FOLD_STATE_FILE.exists():
+        return {}
+    try:
+        return json.loads(FOLD_STATE_FILE.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_fold_state(state: dict[str, bool]) -> None:
+    _ensure_dir()
+    FOLD_STATE_FILE.write_text(json.dumps(state, indent=2) + "\n")

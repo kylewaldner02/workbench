@@ -21,9 +21,11 @@ from workbench.state import (
     delete_project,
     find_project_for_worktree,
     load_archived_projects,
+    load_fold_state,
     load_projects,
     load_repos,
     remove_worktree_from_project,
+    save_fold_state,
     unarchive_project,
 )
 from workbench.status import get_git_status, get_last_commit_time
@@ -330,15 +332,17 @@ class MainScreen(Screen):
     def _rebuild_tree(self, all_worktrees: list[WorktreeInfo], projects: list) -> None:
         tree = self.query_one("#main-tree", Tree)
 
-        # Remember which projects and worktrees were expanded
-        expanded_projects: set[str | None] = set()
-        expanded_worktrees: set[str] = set()
+        # Capture current fold state from the live tree, then merge with persisted
+        fold = load_fold_state()
         for proj_node in tree.root.children:
-            if proj_node.is_expanded and isinstance(proj_node.data, ProjectNodeData):
-                expanded_projects.add(proj_node.data.project_name)
+            if isinstance(proj_node.data, ProjectNodeData):
+                key = f"project:{proj_node.data.project_name}"
+                fold[key] = proj_node.is_expanded
             for wt_node in proj_node.children:
-                if wt_node.is_expanded and isinstance(wt_node.data, WorktreeNodeData):
-                    expanded_worktrees.add(str(wt_node.data.worktree.path))
+                if isinstance(wt_node.data, WorktreeNodeData):
+                    key = f"worktree:{wt_node.data.worktree.path}"
+                    fold[key] = wt_node.is_expanded
+        save_fold_state(fold)
 
         tree.root.remove_children()
 
@@ -357,10 +361,10 @@ class MainScreen(Screen):
                 matching = [wt for wt in all_worktrees if str(wt.path) == pw.worktree_path]
                 if matching:
                     wt = matching[0]
-                    self._add_worktree_node(project_node, wt, project.name, expanded_worktrees)
+                    self._add_worktree_node(project_node, wt, project.name, fold)
 
-            # Restore expand state, default to expanded
-            if project.name in expanded_projects or not expanded_projects:
+            key = f"project:{project.name}"
+            if fold.get(key, True):  # default expanded
                 project_node.expand()
             else:
                 project_node.collapse()
@@ -375,9 +379,10 @@ class MainScreen(Screen):
                 data=ProjectNodeData(project_name=None),
             )
             for wt in unassigned:
-                self._add_worktree_node(unassigned_node, wt, None, expanded_worktrees)
+                self._add_worktree_node(unassigned_node, wt, None, fold)
 
-            if None in expanded_projects or not expanded_projects:
+            key = "project:None"
+            if fold.get(key, True):  # default expanded
                 unassigned_node.expand()
             else:
                 unassigned_node.collapse()
@@ -401,7 +406,7 @@ class MainScreen(Screen):
         parent_node: TreeNode,
         wt: WorktreeInfo,
         project_name: str | None,
-        expanded_worktrees: set[str],
+        fold: dict[str, bool],
     ) -> None:
         label = _format_worktree_label(wt, self.pr_cache)
         wt_node = parent_node.add(
@@ -420,7 +425,8 @@ class MainScreen(Screen):
                 )
 
         # Restore expand state — collapsed by default
-        if str(wt.path) in expanded_worktrees:
+        key = f"worktree:{wt.path}"
+        if fold.get(key, False):
             wt_node.expand()
         else:
             wt_node.collapse()
