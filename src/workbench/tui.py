@@ -16,12 +16,15 @@ from textual.widgets.tree import TreeNode
 from workbench.state import (
     add_repo,
     add_worktree_to_project,
+    archive_project,
     create_project,
     delete_project,
     find_project_for_worktree,
+    load_archived_projects,
     load_projects,
     load_repos,
     remove_worktree_from_project,
+    unarchive_project,
 )
 from workbench.status import get_git_status, get_last_commit_time
 from workbench.tools.ai_agent import ClaudeCodeAgent
@@ -183,7 +186,9 @@ class MainScreen(Screen):
         Binding("n", "new_worktree", "New WT"),
         Binding("P", "new_project", "New Project"),
         Binding("X", "delete_project", "Del Project"),
+        Binding("A", "archive_project", "Archive"),
         Binding("a", "assign_to_project", "Assign"),
+        Binding("d", "view_archived", "Archived"),
         Binding("r", "refresh", "Refresh"),
         Binding("q", "quit", "Quit"),
         # Emacs navigation
@@ -212,7 +217,7 @@ class MainScreen(Screen):
             "open_claude", "open_ide", "open_git", "open_pr",
             "close_worktree", "assign_to_project",
         }
-        project_actions = {"delete_project"}
+        project_actions = {"delete_project", "archive_project"}
 
         if action in worktree_actions:
             return self._selected_worktree_data() is not None
@@ -410,6 +415,16 @@ class MainScreen(Screen):
             delete_project(proj_data.project_name)
             self.notify(f"Deleted project {proj_data.project_name}")
             self.load_data()
+
+    def action_archive_project(self) -> None:
+        proj_data = self._selected_project_data()
+        if proj_data and proj_data.project_name:
+            archive_project(proj_data.project_name)
+            self.notify(f"Archived project {proj_data.project_name}")
+            self.load_data()
+
+    def action_view_archived(self) -> None:
+        self.app.push_screen(ArchivedProjectsScreen())
 
     def action_assign_to_project(self) -> None:
         wt_data = self._selected_worktree_data()
@@ -638,6 +653,61 @@ class CreatePRScreen(Screen):
             self.notify(str(e), severity="error")
 
     def action_cancel(self) -> None:
+        self.app.pop_screen()
+
+
+class ArchivedProjectsScreen(Screen):
+    BINDINGS = [
+        Binding("u", "unarchive", "Unarchive"),
+        Binding("X", "delete_project", "Delete"),
+        Binding("escape", "go_back", "Back"),
+        Binding("backspace", "go_back", "Back"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        yield Label(" Archived Projects", id="archived-header")
+        yield DataTable(id="archived-table")
+        yield WrappingFooter()
+
+    def on_mount(self) -> None:
+        table = self.query_one("#archived-table", DataTable)
+        table.cursor_type = "row"
+        table.add_columns("Project", "Worktrees")
+        self._load()
+
+    def _load(self) -> None:
+        table = self.query_one("#archived-table", DataTable)
+        table.clear()
+        self.archived = load_archived_projects()
+        for p in self.archived:
+            table.add_row(p.name, str(len(p.worktrees)))
+        if not self.archived:
+            self.notify("No archived projects")
+
+    def _selected_project(self) -> str | None:
+        table = self.query_one("#archived-table", DataTable)
+        if not self.archived:
+            return None
+        row = table.cursor_row
+        if 0 <= row < len(self.archived):
+            return self.archived[row].name
+        return None
+
+    def action_unarchive(self) -> None:
+        name = self._selected_project()
+        if name:
+            unarchive_project(name)
+            self.notify(f"Restored project {name}")
+            self._load()
+
+    def action_delete_project(self) -> None:
+        name = self._selected_project()
+        if name:
+            delete_project(name)
+            self.notify(f"Deleted project {name}")
+            self._load()
+
+    def action_go_back(self) -> None:
         self.app.pop_screen()
 
 

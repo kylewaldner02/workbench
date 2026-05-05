@@ -27,15 +27,20 @@ class ProjectWorktree:
 class Project:
     name: str
     worktrees: list[ProjectWorktree] = field(default_factory=list)
+    archived: bool = False
 
     def to_dict(self) -> dict:
-        return {"name": self.name, "worktrees": [w.to_dict() for w in self.worktrees]}
+        d: dict = {"name": self.name, "worktrees": [w.to_dict() for w in self.worktrees]}
+        if self.archived:
+            d["archived"] = True
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> Project:
         return cls(
             name=d["name"],
             worktrees=[ProjectWorktree.from_dict(w) for w in d.get("worktrees", [])],
+            archived=d.get("archived", False),
         )
 
 
@@ -46,7 +51,7 @@ def _ensure_dir() -> None:
 # --- Projects ---
 
 
-def load_projects() -> list[Project]:
+def _load_all_projects() -> list[Project]:
     if not PROJECTS_FILE.exists():
         return []
     try:
@@ -56,10 +61,26 @@ def load_projects() -> list[Project]:
         return []
 
 
+def load_projects() -> list[Project]:
+    return [p for p in _load_all_projects() if not p.archived]
+
+
+def load_archived_projects() -> list[Project]:
+    return [p for p in _load_all_projects() if p.archived]
+
+
 def save_projects(projects: list[Project]) -> None:
+    """Save a full list of projects (active + archived)."""
     _ensure_dir()
     data = {"projects": [p.to_dict() for p in projects]}
     PROJECTS_FILE.write_text(json.dumps(data, indent=2) + "\n")
+
+
+def _save_update(updater) -> None:
+    """Load all projects, apply updater function, save back."""
+    all_projects = _load_all_projects()
+    updater(all_projects)
+    save_projects(all_projects)
 
 
 def get_project(name: str) -> Project | None:
@@ -70,42 +91,41 @@ def get_project(name: str) -> Project | None:
 
 
 def create_project(name: str) -> Project:
-    projects = load_projects()
-    for p in projects:
+    all_projects = _load_all_projects()
+    for p in all_projects:
         if p.name == name:
             raise ValueError(f"Project '{name}' already exists")
     project = Project(name=name)
-    projects.append(project)
-    save_projects(projects)
+    all_projects.append(project)
+    save_projects(all_projects)
     return project
 
 
 def delete_project(name: str) -> None:
-    projects = load_projects()
-    projects = [p for p in projects if p.name != name]
-    save_projects(projects)
+    all_projects = _load_all_projects()
+    all_projects = [p for p in all_projects if p.name != name]
+    save_projects(all_projects)
 
 
 def add_worktree_to_project(project_name: str, repo: str, branch: str, worktree_path: str) -> None:
-    projects = load_projects()
-    for p in projects:
+    all_projects = _load_all_projects()
+    for p in all_projects:
         if p.name == project_name:
-            # Don't add duplicates
             for w in p.worktrees:
                 if w.worktree_path == worktree_path:
                     return
             p.worktrees.append(ProjectWorktree(repo=repo, branch=branch, worktree_path=worktree_path))
-            save_projects(projects)
+            save_projects(all_projects)
             return
     raise ValueError(f"Project '{project_name}' not found")
 
 
 def remove_worktree_from_project(project_name: str, worktree_path: str) -> None:
-    projects = load_projects()
-    for p in projects:
+    all_projects = _load_all_projects()
+    for p in all_projects:
         if p.name == project_name:
             p.worktrees = [w for w in p.worktrees if w.worktree_path != worktree_path]
-            save_projects(projects)
+            save_projects(all_projects)
             return
 
 
@@ -116,6 +136,24 @@ def find_project_for_worktree(worktree_path: str) -> str | None:
             if w.worktree_path == worktree_path:
                 return p.name
     return None
+
+
+def archive_project(name: str) -> None:
+    def _update(projects: list[Project]) -> None:
+        for p in projects:
+            if p.name == name:
+                p.archived = True
+                return
+    _save_update(_update)
+
+
+def unarchive_project(name: str) -> None:
+    def _update(projects: list[Project]) -> None:
+        for p in projects:
+            if p.name == name:
+                p.archived = False
+                return
+    _save_update(_update)
 
 
 # --- Known Repos ---
