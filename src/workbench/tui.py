@@ -231,6 +231,7 @@ class MainScreen(Screen):
         Binding("g", "open_git", "Git"),
         Binding("p", "open_pr", "PR"),
         Binding("s", "resume_session", "Resume"),
+        Binding("f", "fork_session", "Fork"),
         Binding("x", "close_worktree", "Close WT"),
         Binding("n", "new_worktree", "New WT"),
         Binding("P", "new_project", "New Project"),
@@ -278,22 +279,28 @@ class MainScreen(Screen):
             pass
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
-        """Disable worktree-only actions when a project node is selected."""
+        node = self._selected_node()
+        on_session = node is not None and isinstance(node.data, SessionNodeData)
+        on_project = node is not None and isinstance(node.data, ProjectNodeData)
+        on_worktree = node is not None and isinstance(node.data, WorktreeNodeData)
+
         worktree_actions = {
             "open_claude", "open_ide", "open_git", "open_pr",
             "close_worktree", "assign_to_project",
         }
         project_actions = {"delete_project", "archive_project"}
-        session_actions = {"resume_session"}
+        session_actions = {"resume_session", "fork_session"}
 
-        if action in worktree_actions:
-            return self._selected_worktree_data() is not None
-        if action in project_actions:
-            proj = self._selected_project_data()
-            return proj is not None and proj.project_name is not None
         if action in session_actions:
-            node = self._selected_node()
-            return node is not None and isinstance(node.data, SessionNodeData)
+            return on_session
+        if action in worktree_actions:
+            return on_worktree
+        if action in project_actions:
+            return on_project and node.data.project_name is not None
+        if action == "new_worktree":
+            return not on_session
+        if action == "new_project":
+            return not on_session
         return True
 
     def compose(self) -> ComposeResult:
@@ -474,18 +481,20 @@ class MainScreen(Screen):
             cmd = ai_agent.resume_cmd(wt.path, node.data.session_id)
             self.app.launch_agent(cmd, str(wt.path))
 
+    def action_fork_session(self) -> None:
+        node = self._selected_node()
+        if node and isinstance(node.data, SessionNodeData):
+            wt = node.data.worktree
+            # Fork = resume the session (user diverges from there)
+            cmd = ai_agent.resume_cmd(wt.path, node.data.session_id)
+            self.app.launch_agent(cmd, str(wt.path))
+
     def action_open_claude(self) -> None:
         wt_data = self._selected_worktree_data()
         if not wt_data:
             return
         wt = wt_data.worktree
-        # If on a session node, resume that session
-        node = self._selected_node()
-        if node and isinstance(node.data, SessionNodeData):
-            cmd = ai_agent.resume_cmd(wt.path, node.data.session_id)
-            self.app.launch_agent(cmd, str(wt.path))
-            return
-        # On a worktree node: resume most recent session, or open new
+        # Resume most recent session, or open new
         sessions = ai_agent.list_sessions(wt.path)
         if sessions:
             cmd = ai_agent.resume_cmd(wt.path, sessions[0].session_id)
