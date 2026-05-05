@@ -532,14 +532,20 @@ class MainScreen(Screen):
     def action_open_ide(self) -> None:
         wt_data = self._selected_worktree_data()
         if wt_data:
-            ide.open(wt_data.worktree.path)
-            self.notify(f"Opened IDE in {wt_data.worktree.branch}")
+            try:
+                ide.open(wt_data.worktree.path)
+                self.notify(f"Opened IDE in {wt_data.worktree.branch}")
+            except RuntimeError as e:
+                self.notify(str(e), severity="error")
 
     def action_open_git(self) -> None:
         wt_data = self._selected_worktree_data()
         if wt_data:
-            vcs_client.open(wt_data.worktree.path)
-            self.notify(f"Opened git client in {wt_data.worktree.branch}")
+            try:
+                vcs_client.open(wt_data.worktree.path)
+                self.notify(f"Opened git client in {wt_data.worktree.branch}")
+            except RuntimeError as e:
+                self.notify(str(e), severity="error")
 
     def action_open_pr(self) -> None:
         wt_data = self._selected_worktree_data()
