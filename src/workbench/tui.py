@@ -461,9 +461,11 @@ class MainScreen(Screen):
         elif isinstance(node.data, ProjectNodeData):
             node.toggle()
         elif isinstance(node.data, SessionNodeData):
-            wt = node.data.worktree
-            cmd = ai_agent.resume_cmd(wt.path, node.data.session_id)
-            self.app.launch_agent(cmd, str(wt.path))
+            # Leaf: collapse parent worktree and select it
+            if node.parent:
+                tree = self.query_one("#main-tree", Tree)
+                node.parent.collapse()
+                tree.select_node(node.parent)
 
     def action_resume_session(self) -> None:
         node = self._selected_node()
