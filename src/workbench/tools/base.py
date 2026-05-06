@@ -43,6 +43,14 @@ class VCSClient(Protocol):
     def open(self, worktree_path: Path) -> None: ...
 
 
+class Terminal(Protocol):
+    """A terminal emulator (Terminal.app, iTerm2, etc.)"""
+
+    def open(self, worktree_path: Path) -> None: ...
+
+    def run_cmd(self, cmd: list[str], cwd: str) -> None: ...
+
+
 class PRViewer(Protocol):
     """PR management (GitHub CLI, GitLab CLI, etc.)"""
 

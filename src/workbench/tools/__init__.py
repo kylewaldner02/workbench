@@ -3,6 +3,7 @@ from __future__ import annotations
 from workbench.tools.ai_agent import ClaudeCodeAgent
 from workbench.tools.ide import IntelliJIDE, VSCodeIDE
 from workbench.tools.pr_viewer import GitHubCLIPR
+from workbench.tools.terminal import ITerm2, MacTerminal
 from workbench.tools.vcs_client import EmacsMagit, EmacsOpen, LazyGit
 
 REGISTRY = {
@@ -20,6 +21,10 @@ REGISTRY = {
     },
     "pr_viewer": {
         "github": GitHubCLIPR,
+    },
+    "terminal": {
+        "terminal-app": MacTerminal,
+        "iterm2": ITerm2,
     },
 }
 

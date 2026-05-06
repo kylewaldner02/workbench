@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import os
-import shlex
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -52,6 +49,7 @@ ai_agent = None
 ide = None
 vcs_client = None
 pr_viewer = None
+terminal = None
 
 # Column widths for consistent alignment in tree labels
 COL_BRANCH = 24
@@ -158,21 +156,6 @@ def _format_session_label(session, width: int) -> Text:
     label.append(f"{truncated:<{label_width}}")
     label.append(session.last_active, style="dim")
     return label
-
-
-def _open_in_new_terminal(cmd: list[str], cwd: str) -> None:
-    """Open a command in a new Terminal.app window on macOS."""
-    import tempfile
-
-    shell_cmd = " ".join(shlex.quote(c) for c in cmd)
-    # Write a temp script that cd's, runs the command, then cleans itself up
-    fd, script_path = tempfile.mkstemp(suffix=".command")
-    with os.fdopen(fd, "w") as f:
-        f.write("#!/bin/bash\n")
-        f.write(f"cd {shlex.quote(cwd)}\n")
-        f.write(f"exec {shell_cmd}\n")
-    os.chmod(script_path, 0o755)
-    subprocess.Popen(["open", script_path])
 
 
 class WrappingFooter(Static):
@@ -286,6 +269,7 @@ class MainScreen(Screen):
         Binding("O", "new_session", "New Session (same term)"),
         Binding("i", "open_ide", "IDE"),
         Binding("g", "open_git", "Git"),
+        Binding("t", "open_terminal", "Terminal"),
         Binding("p", "open_pr", "PR"),
         Binding("s", "resume_session", "Resume"),
         Binding("S", "resume_session_same_term", "Resume (same term)"),
@@ -380,7 +364,7 @@ class MainScreen(Screen):
         worktree_actions = {
             "open_claude", "open_claude_new_window",
             "new_session", "new_session_new_window",
-            "open_ide", "open_git",
+            "open_ide", "open_git", "open_terminal",
             "open_pr", "close_worktree", "assign_to_project",
         }
         project_actions = {"archive_project"}
@@ -609,7 +593,7 @@ class MainScreen(Screen):
         if node and isinstance(node.data, SessionNodeData):
             wt = node.data.worktree
             cmd = ai_agent.resume_cmd(wt.path, node.data.session_id)
-            _open_in_new_terminal(cmd, str(wt.path))
+            terminal.run_cmd(cmd, str(wt.path))
             self.notify(f"Resumed session in new window for {wt.branch}")
 
     def action_resume_session_same_term(self) -> None:
@@ -624,7 +608,7 @@ class MainScreen(Screen):
         if node and isinstance(node.data, SessionNodeData):
             wt = node.data.worktree
             cmd = ai_agent.resume_cmd(wt.path, node.data.session_id)
-            _open_in_new_terminal(cmd, str(wt.path))
+            terminal.run_cmd(cmd, str(wt.path))
             self.notify(f"Forked session in new window for {wt.branch}")
 
     def action_fork_session_same_term(self) -> None:
@@ -656,7 +640,7 @@ class MainScreen(Screen):
             cmd = ai_agent.resume_cmd(wt.path, sessions[0].session_id)
         else:
             cmd = ai_agent.open_cmd(wt.path)
-        _open_in_new_terminal(cmd, str(wt.path))
+        terminal.run_cmd(cmd, str(wt.path))
         self.notify(f"Opened Claude in new window for {wt.branch}")
 
     def action_new_session_new_window(self) -> None:
@@ -665,7 +649,7 @@ class MainScreen(Screen):
             return
         wt = wt_data.worktree
         cmd = ai_agent.open_cmd(wt.path)
-        _open_in_new_terminal(cmd, str(wt.path))
+        terminal.run_cmd(cmd, str(wt.path))
         self.notify(f"New session in new window for {wt.branch}")
 
     def action_new_session(self) -> None:
@@ -691,6 +675,15 @@ class MainScreen(Screen):
             try:
                 vcs_client.open(wt_data.worktree.path)
                 self.notify(f"Opened git client in {wt_data.worktree.branch}")
+            except RuntimeError as e:
+                self.notify(str(e), severity="error")
+
+    def action_open_terminal(self) -> None:
+        wt_data = self._selected_worktree_data()
+        if wt_data:
+            try:
+                terminal.open(wt_data.worktree.path)
+                self.notify(f"Opened terminal in {wt_data.worktree.branch}")
             except RuntimeError as e:
                 self.notify(str(e), severity="error")
 
@@ -1240,7 +1233,7 @@ class WorkbenchApp(App):
     exec_cwd: str | None = None
 
     def on_mount(self) -> None:
-        global ai_agent, ide, vcs_client, pr_viewer
+        global ai_agent, ide, vcs_client, pr_viewer, terminal
         from workbench.state import ensure_config
         config = ensure_config()
         tools = create_tools(config)
@@ -1248,6 +1241,7 @@ class WorkbenchApp(App):
         ide = tools["ide"]
         vcs_client = tools["vcs_client"]
         pr_viewer = tools["pr_viewer"]
+        terminal = tools["terminal"]
 
         try:
             from workbench.worktree import get_repo_root
