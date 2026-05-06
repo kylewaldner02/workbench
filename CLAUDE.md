@@ -43,6 +43,11 @@ Config lives at `~/.workbench/config.json`. Tool selection is config-driven via 
 - Override `WrappingFooter._rebuild()` to check screen state and render different content during modal states. Call `_rebuild_footer()` on every state transition.
 - `load_data()` runs every 5s and overwrites `#status-bar` — guard with phase checks if using status bar for modal messages.
 
+## Emacs Plugin
+
+The Emacs version lives at `elisp/workbench.el`. Single-file package, installable via straight.el with `:files ("elisp/workbench.el")`. Shares state with the CLI via `~/.workbench/local-state/`. Config is via `defcustom`, not JSON.
+
 ## Skills
 
+- `/emacs-engineer` - Emacs Lisp patterns, gotchas, and async patterns for this project. **Use when modifying elisp/workbench.el.**
 - `/edit-config` - Edit workbench config (tool selection, adding new tools)
