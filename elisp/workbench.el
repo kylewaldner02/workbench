@@ -177,12 +177,25 @@ Called with two args: worktree directory and session plist."
 (defvar workbench--extras-cache nil "Hash table of path -> (status sessions last-commit).")
 (defvar workbench--projects-cache nil "Cached list of project alists.")
 
-;; Column widths
-(defconst workbench--col-branch 24)
-(defconst workbench--col-repo 16)
-(defconst workbench--col-status 12)
-(defconst workbench--col-sessions 14)
+;; Column widths — fixed columns, branch expands to fill remaining space
+;; Each width includes 2 chars of trailing gap
+(defconst workbench--col-repo 28)
+(defconst workbench--col-status 14)
+(defconst workbench--col-sessions 16)
 (defconst workbench--col-pr 8)
+(defconst workbench--col-commit 16)
+(defconst workbench--col-indent 6)
+
+(defun workbench--col-branch ()
+  "Compute branch column width to fill available space."
+  (let* ((fixed (+ workbench--col-indent
+                   workbench--col-repo
+                   workbench--col-status
+                   workbench--col-sessions
+                   workbench--col-pr
+                   workbench--col-commit))
+         (available (- (window-width) fixed)))
+    (max 20 available)))
 
 ;; ══════════════════════════════════════════════════════════════════
 ;; State I/O — reads/writes ~/.workbench/local-state/
@@ -735,13 +748,14 @@ Returns list of plists (:id :label :last-active)."
 
 (defun workbench--render-column-header ()
   "Return the column header line as a propertized string."
-  (concat "      "  ; indent for tree guides
-          (propertize (workbench--pad "Branch" workbench--col-branch) 'face 'workbench-column-header-face)
-          (propertize (workbench--pad "Repo" workbench--col-repo) 'face 'workbench-column-header-face)
-          (propertize (workbench--pad "Status" workbench--col-status) 'face 'workbench-column-header-face)
-          (propertize (workbench--pad "Sessions" workbench--col-sessions) 'face 'workbench-column-header-face)
-          (propertize (workbench--pad "PR" workbench--col-pr) 'face 'workbench-column-header-face)
-          (propertize "Last Commit" 'face 'workbench-column-header-face)))
+  (let ((col-branch (workbench--col-branch)))
+    (concat (make-string workbench--col-indent ?\s)
+            (propertize (workbench--pad "Branch" col-branch) 'face 'workbench-column-header-face)
+            (propertize (workbench--pad "Repo" workbench--col-repo) 'face 'workbench-column-header-face)
+            (propertize (workbench--pad "Status" workbench--col-status) 'face 'workbench-column-header-face)
+            (propertize (workbench--pad "Sessions" workbench--col-sessions) 'face 'workbench-column-header-face)
+            (propertize (workbench--pad "PR" workbench--col-pr) 'face 'workbench-column-header-face)
+            (propertize "Last Commit" 'face 'workbench-column-header-face))))
 
 (defun workbench--render-worktree-line (wt extras)
   "Render a worktree line for WT with cached EXTRAS."
@@ -757,8 +771,9 @@ Returns list of plists (:id :label :last-active)."
          (pr-data (cdr (assoc full-branch workbench--pr-cache)))
          (pr-str (if pr-data (format "#%d" (plist-get pr-data :number)) "-"))
          (last-commit (plist-get extras :last-commit)))
+    (let ((col-branch (workbench--col-branch)))
     (concat
-     (propertize (workbench--pad branch workbench--col-branch) 'face 'workbench-branch-face)
+     (propertize (workbench--pad branch col-branch) 'face 'workbench-branch-face)
      (propertize (workbench--pad repo workbench--col-repo) 'face 'workbench-repo-face)
      (propertize (workbench--pad status workbench--col-status)
                  'face (if (string= status "clean") 'workbench-clean-face 'workbench-dirty-face))
@@ -766,7 +781,7 @@ Returns list of plists (:id :label :last-active)."
                  'face (if (> session-count 0) 'workbench-sessions-face 'workbench-no-sessions-face))
      (propertize (workbench--pad pr-str workbench--col-pr)
                  'face (if pr-data 'workbench-pr-face 'workbench-dim-face))
-     (propertize last-commit 'face 'workbench-dim-face))))
+     (propertize last-commit 'face 'workbench-dim-face)))))
 
 (defun workbench--render-session-line (session)
   "Render a session line for SESSION plist."
