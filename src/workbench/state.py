@@ -17,6 +17,7 @@ DEFAULT_CONFIG = {
     "vcs_client": "emacs-open",
     "ai_agent": "claude-code",
     "pr_viewer": "github",
+    "terminal": "terminal-app",
 }
 
 
