@@ -55,6 +55,13 @@ One of \"emacs-magit\", \"emacs-open\", or \"lazygit\"."
   :group 'workbench
   :type 'integer)
 
+(defcustom workbench-branch-strip-prefixes nil
+  "List of branch name prefixes to strip in the main display.
+For example, (\"kylewaldner/\" \"kyle/\") would display
+\"kylewaldner/my-feature\" as \"my-feature\"."
+  :group 'workbench
+  :type '(repeat string))
+
 ;; Tool launcher function overrides
 ;; Each takes a single DIR argument (the worktree path).
 
@@ -713,6 +720,13 @@ Returns list of plists (:id :label :last-active)."
 ;; Buffer rendering
 ;; ══════════════════════════════════════════════════════════════════
 
+(defun workbench--strip-branch-prefix (branch)
+  "Strip configured prefixes from BRANCH for display."
+  (cl-loop for prefix in workbench-branch-strip-prefixes
+           when (string-prefix-p prefix branch)
+           return (substring branch (length prefix))
+           finally return branch))
+
 (defun workbench--pad (str width)
   "Pad or truncate STR to WIDTH."
   (if (>= (length str) width)
@@ -731,7 +745,8 @@ Returns list of plists (:id :label :last-active)."
 
 (defun workbench--render-worktree-line (wt extras)
   "Render a worktree line for WT with cached EXTRAS."
-  (let* ((branch (plist-get wt :branch))
+  (let* ((full-branch (plist-get wt :branch))
+         (branch (workbench--strip-branch-prefix full-branch))
          (repo (workbench--repo-name (plist-get wt :repo)))
          (status (plist-get extras :status))
          (sessions (plist-get extras :sessions))
@@ -739,7 +754,7 @@ Returns list of plists (:id :label :last-active)."
          (session-str (cond ((= session-count 0) "no sessions")
                             ((= session-count 1) "1 session")
                             (t (format "%d sessions" session-count))))
-         (pr-data (cdr (assoc branch workbench--pr-cache)))
+         (pr-data (cdr (assoc full-branch workbench--pr-cache)))
          (pr-str (if pr-data (format "#%d" (plist-get pr-data :number)) "-"))
          (last-commit (plist-get extras :last-commit)))
     (concat
@@ -1756,6 +1771,7 @@ Returns nil if no other frame exists."
       (kill-buffer wb-buf)))
   (load-file (expand-file-name "~/src/workbench/.worktrees/emacs-plugin-version/elisp/workbench.el"))
   (setq workbench-open-git-function #'kyle-git-opener-workflow)
+  (setq workbench-branch-strip-prefixes '("kylewaldner/" "kyle/" "kylewaldner02/"))
   (workbench))
 
 (provide 'workbench)
