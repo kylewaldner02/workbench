@@ -1063,36 +1063,44 @@ When FETCH-SESSIONS is non-nil, also parse Claude sessions for every worktree."
     (setq workbench--extras-cache ht)))
 
 (defun workbench--fetch-prs-async ()
-  "Fetch PR data asynchronously, then re-render."
-  (let ((buf (current-buffer))
-        (output-buf (generate-new-buffer " *workbench-gh*")))
-    (make-process
-     :name "workbench-gh-pr"
-     :buffer output-buf
-     :command '("gh" "pr" "list" "--json" "number,url,state,title,headRefName" "--limit" "100")
-     :sentinel (lambda (proc _event)
-                 (when (eq (process-status proc) 'exit)
-                   (if (= (process-exit-status proc) 0)
-                       (condition-case nil
-                           (let ((data (with-current-buffer output-buf
-                                         (json-read-from-string (buffer-string))))
-                                 result)
-                             (cl-loop for item across data
-                                      do (push (cons (cdr (assq 'headRefName item))
-                                                     (list :number (cdr (assq 'number item))
-                                                           :url (cdr (assq 'url item))
-                                                           :state (cdr (assq 'state item))
-                                                           :title (cdr (assq 'title item))))
-                                               result))
-                             (when (buffer-live-p buf)
-                               (with-current-buffer buf
-                                 (setq workbench--pr-cache result)
-                                 (workbench--rerender))))
-                         (error nil))
-                     (when (buffer-live-p buf)
-                       (with-current-buffer buf
-                         (setq workbench--pr-cache nil))))
-                   (kill-buffer output-buf))))))
+  "Fetch PR data asynchronously from all repos, then re-render."
+  (let* ((repos (workbench--load-repos))
+         (buf (current-buffer))
+         (remaining (length repos))
+         (all-results nil))
+    (if (null repos)
+        (setq workbench--pr-cache nil)
+      (dolist (repo repos)
+        (let ((output-buf (generate-new-buffer " *workbench-gh*"))
+              (repo-dir (file-name-as-directory (expand-file-name repo))))
+          (make-process
+           :name (format "workbench-gh-pr-%s" (file-name-nondirectory (directory-file-name repo)))
+           :buffer output-buf
+           :command (list "bash" "-c"
+                          (format "cd %s && NO_COLOR=1 gh pr list --json number,url,state,title,headRefName --limit 100"
+                                  (shell-quote-argument repo-dir)))
+           :sentinel
+           (lambda (proc _event)
+             (when (eq (process-status proc) 'exit)
+               (unwind-protect
+                   (when (= (process-exit-status proc) 0)
+                     (condition-case nil
+                         (let ((data (with-current-buffer output-buf
+                                       (json-read-from-string (buffer-string)))))
+                           (cl-loop for item across data
+                                    do (push (cons (cdr (assq 'headRefName item))
+                                                   (list :number (cdr (assq 'number item))
+                                                         :url (cdr (assq 'url item))
+                                                         :state (cdr (assq 'state item))
+                                                         :title (cdr (assq 'title item))))
+                                             all-results)))
+                       (error nil)))
+                 (kill-buffer output-buf)
+                 (setq remaining (1- remaining))
+                 (when (and (= remaining 0) (buffer-live-p buf))
+                   (with-current-buffer buf
+                     (setq workbench--pr-cache all-results)
+                     (workbench--rerender))))))))))))
 
 (defun workbench--get-extras (path)
   "Get cached extras for worktree at PATH, or defaults."
