@@ -1735,6 +1735,78 @@ Returns nil if no other frame exists."
 
 ;; To use: (setq workbench-open-git-function #'kyle-git-opener-workflow)
 
+;; ══════════════════════════════════════════════════════════════════
+;; Custom opener: kyle-terminal-workflow / kyle-claude-workflow
+;; ══════════════════════════════════════════════════════════════════
+;;
+;; Opens commands as new tabs in the existing Terminal.app window
+;; rather than spawning new windows.
+
+(defun kyle--run-in-terminal-tab (cmd cwd)
+  "Run CMD (string) in CWD as a new tab in the existing Terminal.app window.
+Uses `open -g` to avoid bringing other Terminal windows to the front.
+Requires macOS Prefer Tabs setting: System Settings > Desktop & Dock >
+Windows & Apps > Prefer tabs when opening documents > Always."
+  (let* ((cwd (expand-file-name cwd))
+         (script-file (make-temp-file "workbench-" nil ".command"
+                                      (format "#!/bin/bash\ncd %s\n%s\n"
+                                              (shell-quote-argument cwd) cmd))))
+    (set-file-modes script-file #o755)
+    (start-process "kyle-term-tab" nil "open" "-g" "-a" "Terminal" script-file)))
+
+(defun kyle--cmd-to-shell-string (cmd)
+  "Convert CMD (list of strings) to a shell command string."
+  (mapconcat #'shell-quote-argument cmd " "))
+
+(defun kyle--run-in-terminal-tab-steal-focus (cmd cwd)
+  "Like `kyle--run-in-terminal-tab' but brings Terminal to the foreground."
+  (let* ((cwd (expand-file-name cwd))
+         (script-file (make-temp-file "workbench-" nil ".command"
+                                      (format "#!/bin/bash\ncd %s\n%s\n"
+                                              (shell-quote-argument cwd) cmd))))
+    (set-file-modes script-file #o755)
+    (start-process "kyle-term-tab" nil "open" "-a" "Terminal" script-file)))
+
+(defun kyle-terminal-workflow (dir)
+  "Open a new Terminal.app tab at DIR."
+  (kyle--run-in-terminal-tab "exec $SHELL" dir))
+
+(defun kyle-terminal-workflow-steal-focus (dir)
+  "Open a new Terminal.app tab at DIR and bring Terminal to the foreground."
+  (kyle--run-in-terminal-tab-steal-focus "exec $SHELL" dir))
+
+(defun kyle-claude-workflow (dir)
+  "Open Claude in a Terminal.app tab at DIR, resuming most recent session."
+  (let* ((sessions (workbench--claude-list-sessions dir))
+         (cmd (kyle--cmd-to-shell-string
+               (if sessions
+                   (workbench--claude-resume-cmd (plist-get (car sessions) :id))
+                 (workbench--claude-open-cmd)))))
+    (kyle--run-in-terminal-tab cmd dir)))
+
+(defun kyle-new-session-workflow (dir)
+  "Open a new Claude session in a Terminal.app tab at DIR."
+  (kyle--run-in-terminal-tab (kyle--cmd-to-shell-string (workbench--claude-open-cmd)) dir))
+
+(defun kyle-resume-session-workflow (dir session)
+  "Resume Claude SESSION in a Terminal.app tab at DIR."
+  (kyle--run-in-terminal-tab
+   (kyle--cmd-to-shell-string (workbench--claude-resume-cmd (plist-get session :id)))
+   dir))
+
+(defun kyle-fork-session-workflow (dir session)
+  "Fork Claude SESSION in a Terminal.app tab at DIR."
+  (kyle--run-in-terminal-tab
+   (kyle--cmd-to-shell-string (workbench--claude-resume-cmd (plist-get session :id)))
+   dir))
+
+;; To use:
+;; (setq workbench-open-terminal-function #'kyle-terminal-workflow)
+;; (setq workbench-open-claude-function #'kyle-claude-workflow)
+;; (setq workbench-new-session-function #'kyle-new-session-workflow)
+;; (setq workbench-resume-session-function #'kyle-resume-session-workflow)
+;; (setq workbench-fork-session-function #'kyle-fork-session-workflow)
+
 (defun kyle-git-debug ()
   "Debug the multi-frame git opener."
   (interactive)
@@ -1786,6 +1858,11 @@ Returns nil if no other frame exists."
       (kill-buffer wb-buf)))
   (load-file (expand-file-name "~/src/workbench/.worktrees/emacs-plugin-version/elisp/workbench.el"))
   (setq workbench-open-git-function #'kyle-git-opener-workflow)
+  (setq workbench-open-terminal-function #'kyle-terminal-workflow)
+  (setq workbench-open-claude-function #'kyle-claude-workflow)
+  (setq workbench-new-session-function #'kyle-new-session-workflow)
+  (setq workbench-resume-session-function #'kyle-resume-session-workflow)
+  (setq workbench-fork-session-function #'kyle-fork-session-workflow)
   (setq workbench-branch-strip-prefixes '("kylewaldner/" "kyle/" "kylewaldner02/"))
   (workbench))
 
