@@ -811,7 +811,14 @@ Returns list of plists (:id :label :last-active)."
 
 (cl-defun workbench--async-refresh (&optional fetch-sessions)
   "Refresh data asynchronously.  FETCH-SESSIONS means parse Claude sessions too."
-  (when workbench--refresh-in-progress (cl-return-from workbench--async-refresh))
+  (when workbench--refresh-in-progress
+    (if fetch-sessions
+        ;; Full refresh supersedes in-progress one — kill it
+        (let ((proc (get-process "workbench-git-refresh")))
+          (when (and proc (process-live-p proc))
+            (delete-process proc))
+          (setq workbench--refresh-in-progress nil))
+      (cl-return-from workbench--async-refresh)))
   ;; Load projects from JSON (instant file read)
   (setq workbench--projects-cache (workbench--load-projects))
   ;; Render immediately with whatever cache we have
@@ -1107,6 +1114,25 @@ When FETCH-SESSIONS is non-nil, also parse Claude sessions for every worktree."
   (or (and workbench--extras-cache (gethash path workbench--extras-cache))
       (list :status "?" :last-commit "?" :sessions nil :sessions-fetched nil)))
 
+(defun workbench--order-sessions (sessions project-name wt-path)
+  "Reorder SESSIONS according to stored session_order for WT-PATH in PROJECT-NAME.
+Unordered sessions (not in session_order) appear first in their original
+mtime order, followed by ordered sessions in stored order."
+  (if (or (null sessions) (null project-name))
+      sessions
+    (let ((stored-order (workbench--session-order-for-wt project-name wt-path)))
+      (if (null stored-order)
+          sessions
+        (let* ((unordered (cl-remove-if
+                           (lambda (s) (member (plist-get s :id) stored-order))
+                           sessions))
+               (ordered (cl-loop for id in stored-order
+                                 for s = (cl-find id sessions
+                                                   :key (lambda (s) (plist-get s :id))
+                                                   :test #'equal)
+                                 when s collect s)))
+          (append unordered ordered))))))
+
 (defun workbench--get-sessions (wt-path)
   "Get sessions for WT-PATH, fetching lazily on first access."
   (let ((extras (workbench--get-extras wt-path)))
@@ -1197,8 +1223,9 @@ When FETCH-SESSIONS is non-nil, also parse Claude sessions for every worktree."
          (fold-key (format "worktree:%s" path))
          (expanded (workbench--fold-get fold-key nil))
          ;; Only fetch sessions when expanded (lazy)
-         (sessions (if expanded (workbench--get-sessions path)
-                     (plist-get extras :sessions)))
+         (raw-sessions (if expanded (workbench--get-sessions path)
+                          (plist-get extras :sessions)))
+         (sessions (workbench--order-sessions raw-sessions project-name path))
          (prefix (if (and sessions expanded) "  ▼ " (if sessions "  ▶ " "    ")))
          ;; Merge sessions into extras for rendering
          (render-extras (plist-put (copy-sequence extras) :sessions sessions))
@@ -1496,6 +1523,180 @@ Works for worktree lines and session lines (returns parent worktree)."
       (message "Assigned %s to %s" (plist-get wt :branch) choice)
       (workbench-refresh))))
 
+(defun workbench--move-project (name direction)
+  "Move project NAME in DIRECTION (-1 for up, +1 for down).
+Persists the new order and moves the cursor to follow."
+  (let* ((all (workbench--load-all-projects))
+         (active (cl-remove-if (lambda (p) (eq (cdr (assq 'archived p)) t)) all))
+         (archived (cl-remove-if-not (lambda (p) (eq (cdr (assq 'archived p)) t)) all))
+         (idx (cl-position name active :key #'workbench--project-name :test #'equal))
+         (target (when idx (+ idx direction))))
+    (when (and target (>= target 0) (< target (length active)))
+      (let ((item (nth idx active)))
+        (setf (nth idx active) (nth target active))
+        (setf (nth target active) item))
+      (workbench--save-all-projects (append active archived))
+      (setq workbench--projects-cache active)
+      (workbench--rerender)
+      (workbench--goto-node 'project name))))
+
+(defun workbench--move-worktree (wt-path project-name direction)
+  "Move worktree at WT-PATH within PROJECT-NAME by DIRECTION (-1/+1)."
+  (unless project-name (user-error "Cannot reorder unassigned worktrees"))
+  (let* ((all (workbench--load-all-projects))
+         (project (cl-find project-name all :key #'workbench--project-name :test #'equal)))
+    (when project
+      (let* ((wts (append (cdr (assq 'worktrees project)) nil))
+             (idx (cl-position wt-path wts
+                               :key (lambda (w) (expand-file-name (cdr (assq 'worktree_path w))))
+                               :test #'equal))
+             (target (when idx (+ idx direction))))
+        (when (and target (>= target 0) (< target (length wts)))
+          (let ((item (nth idx wts)))
+            (setf (nth idx wts) (nth target wts))
+            (setf (nth target wts) item))
+          (setcdr (assq 'worktrees project) (vconcat wts))
+          (workbench--save-all-projects all)
+          ;; Update cache
+          (setq workbench--projects-cache
+                (cl-remove-if (lambda (p) (eq (cdr (assq 'archived p)) t)) all))
+          (workbench--rerender)
+          (workbench--goto-node 'worktree wt-path))))))
+
+(defun workbench--session-order-for-wt (project-name wt-path)
+  "Get session_order list for WT-PATH in PROJECT-NAME, or nil."
+  (when project-name
+    (let* ((all (workbench--load-all-projects))
+           (project (cl-find project-name all :key #'workbench--project-name :test #'equal)))
+      (when project
+        (let* ((wts (append (cdr (assq 'worktrees project)) nil))
+               (wt-entry (cl-find (expand-file-name wt-path) wts
+                                   :key (lambda (w) (expand-file-name (cdr (assq 'worktree_path w))))
+                                   :test #'equal)))
+          (when wt-entry
+            (let ((order (cdr (assq 'session_order wt-entry))))
+              (when order (append order nil)))))))))
+
+(defun workbench--save-session-order (project-name wt-path order)
+  "Save session ORDER (list of id strings) for WT-PATH in PROJECT-NAME."
+  (when project-name
+    (let* ((all (workbench--load-all-projects))
+           (project (cl-find project-name all :key #'workbench--project-name :test #'equal)))
+      (when project
+        (let* ((wts (append (cdr (assq 'worktrees project)) nil))
+               (wt-entry (cl-find (expand-file-name wt-path) wts
+                                   :key (lambda (w) (expand-file-name (cdr (assq 'worktree_path w))))
+                                   :test #'equal)))
+          (when wt-entry
+            (if (assq 'session_order wt-entry)
+                (setcdr (assq 'session_order wt-entry) (vconcat order))
+              (nconc wt-entry (list (cons 'session_order (vconcat order)))))
+            (setcdr (assq 'worktrees project) (vconcat wts))
+            (workbench--save-all-projects all)
+            (setq workbench--projects-cache
+                  (cl-remove-if (lambda (p) (eq (cdr (assq 'archived p)) t)) all))))))))
+
+(defun workbench--move-session (session-id wt project-name direction)
+  "Move session SESSION-ID within WT by DIRECTION (-1/+1)."
+  (unless project-name (user-error "Cannot reorder sessions for unassigned worktrees"))
+  (let* ((wt-path (plist-get wt :path))
+         (current-sessions (workbench--get-sessions wt-path))
+         (current-ids (mapcar (lambda (s) (plist-get s :id)) current-sessions))
+         (stored-order (workbench--session-order-for-wt project-name wt-path))
+         ;; Materialize: unordered (not in stored-order) first by mtime, then ordered
+         (display-order
+          (if stored-order
+              (let* ((unordered (cl-remove-if (lambda (id) (member id stored-order)) current-ids))
+                     (ordered (cl-remove-if-not (lambda (id) (member id current-ids)) stored-order)))
+                (append unordered ordered))
+            current-ids))
+         (idx (cl-position session-id display-order :test #'equal))
+         (target (when idx (+ idx direction))))
+    (when (and target (>= target 0) (< target (length display-order)))
+      (let ((item (nth idx display-order)))
+        (setf (nth idx display-order) (nth target display-order))
+        (setf (nth target display-order) item))
+      ;; Persist the full order
+      (workbench--save-session-order project-name wt-path display-order)
+      ;; Reorder cached sessions in memory (no disk re-read)
+      (when workbench--extras-cache
+        (let ((extras (gethash wt-path workbench--extras-cache)))
+          (when extras
+            (let* ((cached-sessions (plist-get extras :sessions))
+                   (reordered (cl-loop for id in display-order
+                                       for s = (cl-find id cached-sessions
+                                                         :key (lambda (s) (plist-get s :id))
+                                                         :test #'equal)
+                                       when s collect s)))
+              (puthash wt-path (plist-put (plist-put extras :sessions reordered)
+                                           :sessions-fetched t)
+                       workbench--extras-cache)))))
+      (workbench--rerender)
+      (workbench--goto-node 'session session-id))))
+
+(defun workbench--goto-node (type identifier)
+  "Move cursor to the node of TYPE matching IDENTIFIER after a rerender.
+For project: IDENTIFIER is name.  For worktree: IDENTIFIER is path.
+For session: IDENTIFIER is session id."
+  (goto-char (point-min))
+  (let ((target-line nil))
+    (while (not (eobp))
+      (let ((node (workbench--node-at-point)))
+        (when node
+          (pcase type
+            ('project
+             (when (and (eq (plist-get node :type) 'project)
+                        (equal (plist-get node :name) identifier))
+               (setq target-line (line-number-at-pos))))
+            ('worktree
+             (when (and (eq (plist-get node :type) 'worktree)
+                        (equal (plist-get (plist-get node :wt) :path) identifier))
+               (setq target-line (line-number-at-pos))))
+            ('session
+             (when (and (eq (plist-get node :type) 'session)
+                        (equal (plist-get (plist-get node :session) :id) identifier))
+               (setq target-line (line-number-at-pos)))))))
+      (forward-line 1))
+    (when target-line
+      (goto-char (point-min))
+      (forward-line (1- target-line)))))
+
+(defun workbench-move-up ()
+  "Move the item at point up one position."
+  (interactive)
+  (let ((node (workbench--node-at-point)))
+    (unless node (user-error "No item at point"))
+    (pcase (plist-get node :type)
+      ('project
+       (let ((name (plist-get node :name)))
+         (unless name (user-error "Cannot move this item"))
+         (workbench--move-project name -1)))
+      ('worktree
+       (workbench--move-worktree (plist-get (plist-get node :wt) :path)
+                                  (plist-get node :project-name) -1))
+      ('session
+       (workbench--move-session (plist-get (plist-get node :session) :id)
+                                 (plist-get node :wt)
+                                 (plist-get node :project-name) -1)))))
+
+(defun workbench-move-down ()
+  "Move the item at point down one position."
+  (interactive)
+  (let ((node (workbench--node-at-point)))
+    (unless node (user-error "No item at point"))
+    (pcase (plist-get node :type)
+      ('project
+       (let ((name (plist-get node :name)))
+         (unless name (user-error "Cannot move this item"))
+         (workbench--move-project name 1)))
+      ('worktree
+       (workbench--move-worktree (plist-get (plist-get node :wt) :path)
+                                  (plist-get node :project-name) 1))
+      ('session
+       (workbench--move-session (plist-get (plist-get node :session) :id)
+                                 (plist-get node :wt)
+                                 (plist-get node :project-name) 1)))))
+
 (defun workbench-view-archived ()
   "Show archived projects in a separate buffer."
   (interactive)
@@ -1591,6 +1792,8 @@ Works for worktree lines and session lines (returns parent worktree)."
    ("A" "Archive project" workbench-archive-project)
    ("d" "View archived" workbench-view-archived)]
   ["Other"
+   ("[" "Move up" workbench-move-up)
+   ("]" "Move down" workbench-move-down)
    ("R" "Add repo" workbench-add-repo)
    ("r" "Refresh" workbench-refresh)
    ("q" "Quit" quit-window)])
@@ -1622,6 +1825,8 @@ Works for worktree lines and session lines (returns parent worktree)."
     (define-key map (kbd "A") #'workbench-archive-project)
     (define-key map (kbd "a") #'workbench-assign-to-project)
     (define-key map (kbd "d") #'workbench-view-archived)
+    (define-key map (kbd "[") #'workbench-move-up)
+    (define-key map (kbd "]") #'workbench-move-down)
     ;; Other
     (define-key map (kbd "r") #'workbench-refresh)
     (define-key map (kbd "?") #'workbench-dispatch)
@@ -1864,7 +2069,7 @@ Windows & Apps > Prefer tabs when opening documents > Always."
   (let ((wb-buf (get-buffer "*workbench*")))
     (when wb-buf
       (kill-buffer wb-buf)))
-  (load-file (expand-file-name "~/src/workbench/.worktrees/emacs-plugin-version/elisp/workbench.el"))
+  (load-file (expand-file-name "~/src/workbench/.worktrees/move-projects-and-wt-around/elisp/workbench.el"))
   (setq workbench-open-git-function #'kyle-git-opener-workflow)
   (setq workbench-open-terminal-function #'kyle-terminal-workflow)
   (setq workbench-open-claude-function #'kyle-claude-workflow)
