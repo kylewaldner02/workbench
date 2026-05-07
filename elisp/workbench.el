@@ -811,7 +811,14 @@ Returns list of plists (:id :label :last-active)."
 
 (cl-defun workbench--async-refresh (&optional fetch-sessions)
   "Refresh data asynchronously.  FETCH-SESSIONS means parse Claude sessions too."
-  (when workbench--refresh-in-progress (cl-return-from workbench--async-refresh))
+  (when workbench--refresh-in-progress
+    (if fetch-sessions
+        ;; Full refresh supersedes in-progress one — kill it
+        (let ((proc (get-process "workbench-git-refresh")))
+          (when (and proc (process-live-p proc))
+            (delete-process proc))
+          (setq workbench--refresh-in-progress nil))
+      (cl-return-from workbench--async-refresh)))
   ;; Load projects from JSON (instant file read)
   (setq workbench--projects-cache (workbench--load-projects))
   ;; Render immediately with whatever cache we have
