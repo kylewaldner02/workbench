@@ -862,8 +862,8 @@ Returns list of plists (:id :label :last-active)."
                                   ht)))
                      (setq workbench--extras-cache ht))
                    (workbench--rerender)
-                   (workbench--fetch-prs-async)
                    (when do-sessions
+                     (workbench--fetch-prs-async)
                      (workbench--fetch-sessions-incrementally)))))
            (setq workbench--refresh-in-progress nil)
            (kill-buffer output-buf)))))))
