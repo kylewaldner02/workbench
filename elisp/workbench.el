@@ -1496,6 +1496,49 @@ Works for worktree lines and session lines (returns parent worktree)."
       (message "Assigned %s to %s" (plist-get wt :branch) choice)
       (workbench-refresh))))
 
+(defun workbench--move-project (name direction)
+  "Move project NAME in DIRECTION (-1 for up, +1 for down).
+Persists the new order and moves the cursor to follow."
+  (let* ((all (workbench--load-all-projects))
+         (active (cl-remove-if (lambda (p) (eq (cdr (assq 'archived p)) t)) all))
+         (archived (cl-remove-if-not (lambda (p) (eq (cdr (assq 'archived p)) t)) all))
+         (idx (cl-position name active :key #'workbench--project-name :test #'equal))
+         (target (when idx (+ idx direction))))
+    (when (and target (>= target 0) (< target (length active)))
+      (let ((item (nth idx active)))
+        (setf (nth idx active) (nth target active))
+        (setf (nth target active) item))
+      (workbench--save-all-projects (append active archived))
+      (setq workbench--projects-cache active)
+      (workbench--rerender)
+      ;; Find the project line and put cursor there
+      (goto-char (point-min))
+      (let ((target-line nil))
+        (while (not (eobp))
+          (let ((node (workbench--node-at-point)))
+            (when (and node
+                       (eq (plist-get node :type) 'project)
+                       (equal (plist-get node :name) name))
+              (setq target-line (line-number-at-pos))))
+          (forward-line 1))
+        (when target-line
+          (goto-char (point-min))
+          (forward-line (1- target-line)))))))
+
+(defun workbench-move-project-up ()
+  "Move the project at point up one position."
+  (interactive)
+  (let ((name (workbench--project-at-point)))
+    (unless name (user-error "Not on a project line"))
+    (workbench--move-project name -1)))
+
+(defun workbench-move-project-down ()
+  "Move the project at point down one position."
+  (interactive)
+  (let ((name (workbench--project-at-point)))
+    (unless name (user-error "Not on a project line"))
+    (workbench--move-project name 1)))
+
 (defun workbench-view-archived ()
   "Show archived projects in a separate buffer."
   (interactive)
@@ -1589,7 +1632,9 @@ Works for worktree lines and session lines (returns parent worktree)."
   ["Project"
    ("P" "New project" workbench-new-project)
    ("A" "Archive project" workbench-archive-project)
-   ("d" "View archived" workbench-view-archived)]
+   ("d" "View archived" workbench-view-archived)
+   ("[" "Move project up" workbench-move-project-up)
+   ("]" "Move project down" workbench-move-project-down)]
   ["Other"
    ("R" "Add repo" workbench-add-repo)
    ("r" "Refresh" workbench-refresh)
@@ -1622,6 +1667,8 @@ Works for worktree lines and session lines (returns parent worktree)."
     (define-key map (kbd "A") #'workbench-archive-project)
     (define-key map (kbd "a") #'workbench-assign-to-project)
     (define-key map (kbd "d") #'workbench-view-archived)
+    (define-key map (kbd "[") #'workbench-move-project-up)
+    (define-key map (kbd "]") #'workbench-move-project-down)
     ;; Other
     (define-key map (kbd "r") #'workbench-refresh)
     (define-key map (kbd "?") #'workbench-dispatch)
@@ -1864,7 +1911,7 @@ Windows & Apps > Prefer tabs when opening documents > Always."
   (let ((wb-buf (get-buffer "*workbench*")))
     (when wb-buf
       (kill-buffer wb-buf)))
-  (load-file (expand-file-name "~/src/workbench/.worktrees/emacs-plugin-version/elisp/workbench.el"))
+  (load-file (expand-file-name "~/src/workbench/.worktrees/move-projects-and-wt-around/elisp/workbench.el"))
   (setq workbench-open-git-function #'kyle-git-opener-workflow)
   (setq workbench-open-terminal-function #'kyle-terminal-workflow)
   (setq workbench-open-claude-function #'kyle-claude-workflow)
