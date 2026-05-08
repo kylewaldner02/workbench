@@ -1,6 +1,6 @@
 # Workbench
 
-A worktree manager with integrated tool launchers for Claude Code, IDEs, and VCS clients.
+A worktree manager with integrated tool launchers for Claude Code, IDEs, and git clients.
 
 ## Emacs Plugin (Recommended)
 
