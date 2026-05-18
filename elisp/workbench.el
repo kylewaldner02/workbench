@@ -1007,7 +1007,7 @@ Output: WT\\tPATH\\tBRANCH\\tHEAD\\tREPO and ST\\tPATH\\tSTATUS\\tLAST_COMMIT li
                "        if [ -n \"$wt_path\" ] && [ \"$bare\" -eq 0 ]; then\n"
                "          printf 'WT\\t%s\\t%s\\t%s\\t%s\\n' \"$wt_path\" \"$branch\" \"$head\" \"$repo_dir\"\n"
                "          if [ -d \"$wt_path\" ]; then\n"
-               "            s=$(cd \"$wt_path\" && git status --porcelain 2>/dev/null)\n"
+               "            s=$(cd \"$wt_path\" && git --no-optional-locks status --porcelain 2>/dev/null)\n"
                "            n=0; [ -n \"$s\" ] && n=$(printf '%s\\n' \"$s\" | wc -l | tr -d ' ')\n"
                "            if [ \"$n\" -eq 0 ]; then ss='clean'\n"
                "            elif [ \"$n\" -eq 1 ]; then ss='1 change'\n"
