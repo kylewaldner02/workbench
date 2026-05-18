@@ -1501,13 +1501,36 @@ Works for worktree lines and session lines (returns parent worktree)."
     (workbench-refresh)))
 
 (defun workbench-archive-project ()
-  "Archive the project at point."
+  "Archive the project at point, closing all its worktrees."
   (interactive)
   (let ((name (workbench--project-at-point)))
     (unless name (user-error "No project at point"))
-    (workbench--archive-project name)
-    (message "Archived project %s" name)
-    (workbench-refresh)))
+    (let* ((project (cl-find name (workbench--load-projects)
+                             :key #'workbench--project-name :test #'equal))
+           (pwts (workbench--project-worktrees project))
+           (all-wts (or workbench--wt-cache (workbench--list-all-worktrees)))
+           (live-wts (cl-loop for pw in pwts
+                              for path = (expand-file-name (cdr (assq 'worktree_path pw)))
+                              for wt = (cl-find path all-wts
+                                                :key (lambda (w) (plist-get w :path))
+                                                :test #'equal)
+                              when wt collect wt))
+           (has-unpushed (cl-some (lambda (wt)
+                                    (workbench--has-unpushed-changes
+                                     (plist-get wt :path) (plist-get wt :branch)))
+                                  live-wts)))
+      (when has-unpushed
+        (unless (y-or-n-p (format "Project '%s' has worktrees with unpushed changes. Archive anyway? " name))
+          (user-error "Cancelled")))
+      (dolist (wt live-wts)
+        (if (workbench--is-main-worktree wt)
+            (workbench--hide-worktree (plist-get wt :path))
+          (condition-case err
+              (workbench--remove-worktree (plist-get wt :path))
+            (error (message "Warning: %s" (error-message-string err))))))
+      (workbench--archive-project name)
+      (message "Archived project %s" name)
+      (workbench-refresh))))
 
 (defun workbench-assign-to-project ()
   "Assign the worktree at point to a project."
