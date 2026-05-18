@@ -801,9 +801,11 @@ Returns list of plists (:id :label :last-active)."
         (workbench--async-refresh t)))))
 
 (defun workbench--quick-refresh ()
-  "Lightweight async refresh for the timer — skips session parsing."
+  "Lightweight async refresh for the timer — skips session parsing.
+Only runs when the buffer is displayed on a non-iconified frame."
   (let ((buf (get-buffer "*workbench*")))
-    (when (and buf (buffer-live-p buf))
+    (when (and buf (buffer-live-p buf)
+               (get-buffer-window buf 'visible))
       (with-current-buffer buf
         (workbench--async-refresh nil)))))
 
