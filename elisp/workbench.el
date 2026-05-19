@@ -1153,9 +1153,12 @@ mtime order, followed by ordered sessions in stored order."
 
 (defun workbench--rerender ()
   "Re-render the buffer from cached data (fast, no I/O)."
-  (let ((inhibit-read-only t)
-        (line (line-number-at-pos))
-        (all-wts (or workbench--wt-cache nil))
+  (let* ((win (get-buffer-window (current-buffer)))
+         (inhibit-read-only t)
+         (line (if win
+                   (line-number-at-pos (window-point win))
+                 (line-number-at-pos)))
+         (all-wts (or workbench--wt-cache nil))
         (projects (or workbench--projects-cache nil))
         (assigned-paths (make-hash-table :test 'equal)))
     (erase-buffer)
@@ -1219,7 +1222,9 @@ mtime order, followed by ordered sessions in stored order."
     (forward-line (1- line))
     (beginning-of-line)
     (when (eobp) (forward-line -1))
-    (workbench--ensure-on-node)))
+    (workbench--ensure-on-node)
+    (when win
+      (set-window-point win (point)))))
 
 (defun workbench--insert-worktree-node (wt project-name)
   "Insert a worktree node for WT under PROJECT-NAME."
