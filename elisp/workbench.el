@@ -648,27 +648,30 @@ Returns list of plists (:id :label :last-active)."
               result))))
     (error nil)))
 
-(defun workbench--create-pr (branch base)
-  "Create a PR for BRANCH against BASE.  Return PR plist."
-  (with-temp-buffer
-    (let ((exit-code (call-process "gh" nil t nil
-                                   "pr" "create" "--head" branch "--base" base "--fill")))
-      (unless (= exit-code 0)
-        (user-error "Failed to create PR: %s" (string-trim (buffer-string))))))
-  ;; Fetch the created PR
-  (with-temp-buffer
-    (let ((exit-code (call-process "gh" nil t nil
-                                   "pr" "view" branch "--json" "number,url,state,title")))
-      (when (= exit-code 0)
-        (let ((data (json-read-from-string (buffer-string))))
-          (list :number (cdr (assq 'number data))
-                :url (cdr (assq 'url data))
-                :state (cdr (assq 'state data))
-                :title (cdr (assq 'title data))))))))
+(defun workbench--create-pr (branch base dir)
+  "Create a PR for BRANCH against BASE.  DIR must be inside the repo.
+Return PR plist."
+  (let ((default-directory (file-name-as-directory (expand-file-name dir))))
+    (with-temp-buffer
+      (let ((exit-code (call-process "gh" nil t nil
+                                     "pr" "create" "--head" branch "--base" base "--fill")))
+        (unless (= exit-code 0)
+          (user-error "Failed to create PR: %s" (string-trim (buffer-string))))))
+    ;; Fetch the created PR
+    (with-temp-buffer
+      (let ((exit-code (call-process "gh" nil t nil
+                                     "pr" "view" branch "--json" "number,url,state,title")))
+        (when (= exit-code 0)
+          (let ((data (json-read-from-string (buffer-string))))
+            (list :number (cdr (assq 'number data))
+                  :url (cdr (assq 'url data))
+                  :state (cdr (assq 'state data))
+                  :title (cdr (assq 'title data)))))))))
 
-(defun workbench--open-pr-in-browser (branch)
-  "Open PR for BRANCH in browser."
-  (call-process "gh" nil nil nil "pr" "view" branch "--web"))
+(defun workbench--open-pr-in-browser (branch dir)
+  "Open PR for BRANCH in browser.  DIR must be inside the repo."
+  (let ((default-directory (file-name-as-directory (expand-file-name dir))))
+    (call-process "gh" nil nil nil "pr" "view" branch "--web")))
 
 ;; ══════════════════════════════════════════════════════════════════
 ;; Tool launchers
@@ -1430,10 +1433,10 @@ Works for worktree lines and session lines (returns parent worktree)."
            (pr (cdr (assoc branch workbench--pr-cache))))
       (if pr
           (progn
-            (workbench--open-pr-in-browser branch)
+            (workbench--open-pr-in-browser branch (plist-get wt :path))
             (message "Opened PR #%d in browser" (plist-get pr :number)))
         (let ((base (read-string "Create PR — base branch: " "main")))
-          (let ((new-pr (workbench--create-pr branch base)))
+          (let ((new-pr (workbench--create-pr branch base (plist-get wt :path))))
             (when new-pr
               (message "Created PR #%d" (plist-get new-pr :number))
               (workbench-refresh))))))))
