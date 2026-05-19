@@ -143,7 +143,18 @@ Called with two args: worktree directory and session plist."
 
 (defface workbench-pr-face
   '((t :foreground "cyan"))
-  "Face for PR numbers."
+  "Face for open PR numbers."
+  :group 'workbench)
+
+(defface workbench-pr-merged-face
+  '((t :foreground "magenta"))
+  "Face for merged PR numbers."
+  :group 'workbench)
+
+(defface workbench-merged-line-face
+  '((((background dark)) :background "#1a0a2e")
+    (((background light)) :background "#f0e6ff"))
+  "Background face for worktree lines with merged PRs."
   :group 'workbench)
 
 (defface workbench-dim-face
@@ -182,7 +193,7 @@ Called with two args: worktree directory and session plist."
 (defconst workbench--col-repo 28)
 (defconst workbench--col-status 14)
 (defconst workbench--col-sessions 16)
-(defconst workbench--col-pr 8)
+(defconst workbench--col-pr 10)
 (defconst workbench--col-commit 16)
 (defconst workbench--col-indent 6)
 
@@ -529,9 +540,10 @@ parent dirs are added until all names are unique."
 
 (defun workbench--remove-worktree (wt-path)
   "Remove the worktree at WT-PATH."
-  (let ((result (with-temp-buffer
-                  (call-process "git" nil t nil "worktree" "remove" wt-path "--force")
-                  (buffer-string))))
+  (let* ((default-directory (file-name-as-directory (expand-file-name wt-path)))
+         (result (with-temp-buffer
+                   (call-process "git" nil t nil "worktree" "remove" wt-path "--force")
+                   (buffer-string))))
     (when (string-match-p "fatal" result)
       (user-error "Failed to remove worktree: %s" (string-trim result)))))
 
@@ -626,27 +638,6 @@ Returns list of plists (:id :label :last-active)."
 ;; ══════════════════════════════════════════════════════════════════
 ;; PR operations (via gh CLI)
 ;; ══════════════════════════════════════════════════════════════════
-
-(defun workbench--list-prs ()
-  "Fetch open PRs via `gh pr list`.  Return alist of (branch . plist)."
-  (condition-case nil
-      (with-temp-buffer
-        (let ((exit-code (call-process "gh" nil t nil
-                                       "pr" "list" "--json"
-                                       "number,url,state,title,headRefName"
-                                       "--limit" "100")))
-          (when (= exit-code 0)
-            (let ((data (json-read-from-string (buffer-string)))
-                  result)
-              (cl-loop for item across data
-                       do (push (cons (cdr (assq 'headRefName item))
-                                      (list :number (cdr (assq 'number item))
-                                            :url (cdr (assq 'url item))
-                                            :state (cdr (assq 'state item))
-                                            :title (cdr (assq 'title item))))
-                                result))
-              result))))
-    (error nil)))
 
 (defun workbench--create-pr (branch base dir)
   "Create a PR for BRANCH against BASE.  DIR must be inside the repo.
@@ -772,19 +763,28 @@ Return PR plist."
                             ((= session-count 1) "1 session")
                             (t (format "%d sessions" session-count))))
          (pr-data (cdr (assoc full-branch workbench--pr-cache)))
-         (pr-str (if pr-data (format "#%d" (plist-get pr-data :number)) "-"))
-         (last-commit (plist-get extras :last-commit)))
-    (let ((col-branch (workbench--col-branch)))
-    (concat
-     (propertize (workbench--pad branch col-branch) 'face 'workbench-branch-face)
-     (propertize (workbench--pad repo workbench--col-repo) 'face 'workbench-repo-face)
-     (propertize (workbench--pad status workbench--col-status)
-                 'face (if (string= status "clean") 'workbench-clean-face 'workbench-dirty-face))
-     (propertize (workbench--pad session-str workbench--col-sessions)
-                 'face (if (> session-count 0) 'workbench-sessions-face 'workbench-no-sessions-face))
-     (propertize (workbench--pad pr-str workbench--col-pr)
-                 'face (if pr-data 'workbench-pr-face 'workbench-dim-face))
-     (propertize last-commit 'face 'workbench-dim-face)))))
+         (pr-state (and pr-data (plist-get pr-data :state)))
+         (pr-merged (and pr-state (string= pr-state "MERGED")))
+         (pr-str (cond (pr-merged (format "#%d ✓" (plist-get pr-data :number)))
+                       (pr-data (format "#%d" (plist-get pr-data :number)))
+                       (t "-")))
+         (last-commit (plist-get extras :last-commit))
+         (line (let ((col-branch (workbench--col-branch)))
+                 (concat
+                  (propertize (workbench--pad branch col-branch) 'face 'workbench-branch-face)
+                  (propertize (workbench--pad repo workbench--col-repo) 'face 'workbench-repo-face)
+                  (propertize (workbench--pad status workbench--col-status)
+                              'face (if (string= status "clean") 'workbench-clean-face 'workbench-dirty-face))
+                  (propertize (workbench--pad session-str workbench--col-sessions)
+                              'face (if (> session-count 0) 'workbench-sessions-face 'workbench-no-sessions-face))
+                  (propertize (workbench--pad pr-str workbench--col-pr)
+                              'face (cond (pr-merged 'workbench-pr-merged-face)
+                                          (pr-data 'workbench-pr-face)
+                                          (t 'workbench-dim-face)))
+                  (propertize last-commit 'face 'workbench-dim-face)))))
+    (if pr-merged
+        (propertize line 'face 'workbench-merged-line-face)
+      line)))
 
 (defun workbench--render-session-line (session)
   "Render a session line for SESSION plist."
@@ -1089,7 +1089,7 @@ When FETCH-SESSIONS is non-nil, also parse Claude sessions for every worktree."
            :name (format "workbench-gh-pr-%s" (file-name-nondirectory (directory-file-name repo)))
            :buffer output-buf
            :command (list "bash" "-c"
-                          (format "cd %s && NO_COLOR=1 gh pr list --json number,url,state,title,headRefName --limit 100"
+                          (format "cd %s && NO_COLOR=1 gh pr list --state all --json number,url,state,title,headRefName --limit 100"
                                   (shell-quote-argument repo-dir)))
            :sentinel
            (lambda (proc _event)
@@ -1481,6 +1481,9 @@ Works for worktree lines and session lines (returns parent worktree)."
     (let ((wt (workbench--create-worktree repo-path branch)))
       (when project-name
         (workbench--add-worktree-to-project project-name repo-path branch (plist-get wt :path)))
+      ;; Add to cache so the worktree appears in the immediate re-render
+      (when workbench--wt-cache
+        (push wt workbench--wt-cache))
       (message "Created worktree for %s" branch)
       (workbench-refresh))))
 
