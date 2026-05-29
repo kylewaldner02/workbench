@@ -380,6 +380,14 @@ Called with two args: worktree directory and session plist."
     (workbench--write-json "hidden_worktrees.json"
                            `((hidden . ,(vconcat (sort hidden #'string<)))))))
 
+(defun workbench--unhide-worktree (wt-path)
+  "Unhide worktree at WT-PATH.  No-op if not hidden."
+  (let ((hidden (workbench--load-hidden-worktrees)))
+    (when (member wt-path hidden)
+      (setq hidden (delete wt-path hidden))
+      (workbench--write-json "hidden_worktrees.json"
+                             `((hidden . ,(vconcat (sort hidden #'string<))))))))
+
 ;; ══════════════════════════════════════════════════════════════════
 ;; Git operations
 ;; ══════════════════════════════════════════════════════════════════
@@ -522,6 +530,19 @@ parent dirs are added until all names are unique."
   (string= (expand-file-name (plist-get wt :path))
            (expand-file-name (plist-get wt :repo))))
 
+(defun workbench--repo-default-branch (repo-path)
+  "Return the default branch name for REPO-PATH (e.g. \"main\")."
+  (let ((ref (workbench--git-output repo-path
+               "symbolic-ref" "--short" "refs/remotes/origin/HEAD")))
+    (if (and ref (string-match "origin/\\(.+\\)" ref))
+        (match-string 1 ref)
+      "main")))
+
+(defun workbench--branch-exists-p (repo-path branch)
+  "Return non-nil if BRANCH exists in REPO-PATH."
+  (workbench--git-output repo-path "rev-parse" "--verify"
+                         (concat "refs/heads/" branch)))
+
 (defun workbench--create-worktree (repo-path branch)
   "Create a new worktree for BRANCH in REPO-PATH.  Return the worktree plist."
   (let* ((wt-dir (expand-file-name ".worktrees/" repo-path))
@@ -534,6 +555,20 @@ parent dirs are added until all names are unique."
           (unless result2
             (user-error "Failed to create worktree for %s" branch)))))
     ;; Find and return the new worktree
+    (or (cl-find wt-path (workbench--list-worktrees-for-repo repo-path)
+                 :key (lambda (w) (plist-get w :path)) :test #'equal)
+        (list :path wt-path :branch branch :head "unknown" :repo repo-path))))
+
+(defun workbench--create-worktree-fresh (repo-path branch)
+  "Create a worktree for BRANCH in REPO-PATH, resetting the branch to HEAD.
+Uses `git worktree add -B` to force-reset an existing branch."
+  (let* ((wt-dir (expand-file-name ".worktrees/" repo-path))
+         (wt-path (expand-file-name branch wt-dir)))
+    (make-directory wt-dir t)
+    (let ((result (workbench--git-output repo-path
+                    "worktree" "add" wt-path "-B" branch "HEAD")))
+      (unless result
+        (user-error "Failed to create worktree for %s" branch)))
     (or (cl-find wt-path (workbench--list-worktrees-for-repo repo-path)
                  :key (lambda (w) (plist-get w :path)) :test #'equal)
         (list :path wt-path :branch branch :head "unknown" :repo repo-path))))
@@ -1168,7 +1203,13 @@ mtime order, followed by ordered sessions in stored order."
     (dolist (project projects)
       (let* ((name (workbench--project-name project))
              (pwts (workbench--project-worktrees project))
-             (wt-count (length pwts))
+             (wt-count (cl-count-if
+                        (lambda (pw)
+                          (let ((p (expand-file-name (cdr (assq 'worktree_path pw)))))
+                            (cl-find p all-wts
+                                     :key (lambda (w) (plist-get w :path))
+                                     :test #'equal)))
+                        pwts))
              (fold-key (format "project:%s" name))
              (expanded (workbench--fold-get fold-key t)))
         ;; Project header
@@ -1469,28 +1510,101 @@ Works for worktree lines and session lines (returns parent worktree)."
         (message "Removed worktree %s" branch))
       (workbench-refresh))))
 
+(defun workbench--context-project-name ()
+  "Return the project name from cursor context, or nil."
+  (let ((node (workbench--node-at-point)))
+    (when node
+      (pcase (plist-get node :type)
+        ('project (plist-get node :name))
+        ('worktree (plist-get node :project-name))
+        ('session (plist-get node :project-name))))))
+
+(defun workbench--project-repo (project-name)
+  "Return the repo path for PROJECT-NAME from its first worktree, or nil."
+  (let* ((project (cl-find project-name (workbench--load-all-projects)
+                           :key #'workbench--project-name :test #'equal))
+         (pwts (when project (workbench--project-worktrees project)))
+         (first-wt (car pwts)))
+    (when first-wt
+      (expand-file-name (cdr (assq 'repo first-wt))))))
+
 (defun workbench-new-worktree ()
   "Create a new worktree."
   (interactive)
   (let* ((repos (workbench--load-repos))
          (_ (unless repos (user-error "No repos registered.  Use R to add one")))
+         (ctx-project (workbench--context-project-name))
+         (ctx-repo (when ctx-project (workbench--project-repo ctx-project)))
+         ;; Repo selection — auto-fill from context
          (repo-names (workbench--disambiguate-paths repos))
-         (repo-choice (completing-read "Repo: " (mapcar #'car repo-names) nil t))
+         (repo-display-names (mapcar #'car repo-names))
+         (ctx-repo-display (when ctx-repo
+                             (car (cl-find ctx-repo repo-names
+                                           :key #'cdr :test #'equal))))
+         (repo-choice (if (and ctx-repo-display (= (length repos) 1))
+                          ctx-repo-display
+                        (completing-read "Repo: " repo-display-names nil t
+                                         ctx-repo-display)))
          (repo-path (cdr (assoc repo-choice repo-names)))
          (branch (read-string "Branch name: "))
+         (_ (when (string-empty-p branch) (user-error "Branch name cannot be empty")))
+         ;; Project selection — auto-fill from context
          (projects (workbench--load-projects))
          (project-names (cons "(no project)" (mapcar #'workbench--project-name projects)))
-         (project-choice (completing-read "Project: " project-names nil t))
-         (project-name (unless (string= project-choice "(no project)") project-choice)))
-    (when (string-empty-p branch) (user-error "Branch name cannot be empty"))
-    (let ((wt (workbench--create-worktree repo-path branch)))
+         (project-initial (when (and ctx-project
+                                     (member ctx-project project-names))
+                            ctx-project))
+         (project-choice (completing-read "Project: " project-names nil t
+                                          project-initial))
+         (project-name (unless (string= project-choice "(no project)") project-choice))
+         ;; Detect special cases
+         (default-branch (workbench--repo-default-branch repo-path))
+         (is-default-branch (string= branch default-branch))
+         (hidden (workbench--load-hidden-worktrees))
+         (main-wt-path (expand-file-name repo-path))
+         (regular-wt-path (expand-file-name branch
+                                            (expand-file-name ".worktrees/" repo-path))))
+    (cond
+     ;; Default branch (main) is hidden → just unhide it
+     ((and is-default-branch (member main-wt-path hidden))
+      (workbench--unhide-worktree main-wt-path)
       (when project-name
-        (workbench--add-worktree-to-project project-name repo-path branch (plist-get wt :path)))
-      ;; Add to cache so the worktree appears in the immediate re-render
-      (when workbench--wt-cache
-        (push wt workbench--wt-cache))
-      (message "Created worktree for %s" branch)
-      (workbench-refresh))))
+        (workbench--add-worktree-to-project project-name repo-path branch main-wt-path))
+      (message "Restored worktree for %s" branch)
+      (workbench-refresh))
+     ;; Non-default branch has a hidden worktree → unhide
+     ((member regular-wt-path hidden)
+      (workbench--unhide-worktree regular-wt-path)
+      (when project-name
+        (workbench--add-worktree-to-project project-name repo-path branch regular-wt-path))
+      (message "Restored worktree for %s" branch)
+      (workbench-refresh))
+     ;; Branch already exists in git → ask resume or fresh
+     ((workbench--branch-exists-p repo-path branch)
+      (let* ((choice (completing-read
+                      (format "Branch '%s' exists. " branch)
+                      '("Resume existing" "Start fresh from HEAD") nil t))
+             (fresh (string= choice "Start fresh from HEAD"))
+             (wt (if fresh
+                     (workbench--create-worktree-fresh repo-path branch)
+                   (workbench--create-worktree repo-path branch))))
+        (when project-name
+          (workbench--add-worktree-to-project project-name repo-path branch
+                                              (plist-get wt :path)))
+        (when workbench--wt-cache
+          (push wt workbench--wt-cache))
+        (message "Created worktree for %s" branch)
+        (workbench-refresh)))
+     ;; New branch → normal flow
+     (t
+      (let ((wt (workbench--create-worktree repo-path branch)))
+        (when project-name
+          (workbench--add-worktree-to-project project-name repo-path branch
+                                              (plist-get wt :path)))
+        (when workbench--wt-cache
+          (push wt workbench--wt-cache))
+        (message "Created worktree for %s" branch)
+        (workbench-refresh))))))
 
 (defun workbench-new-project ()
   "Create a new project."
@@ -1783,12 +1897,56 @@ For session: IDENTIFIER is session id."
   (get-text-property (point) 'workbench-archived-name))
 
 (defun workbench-archived-unarchive ()
-  "Unarchive the project at point."
+  "Unarchive the project at point, restoring its worktrees."
   (interactive)
-  (let ((name (workbench-archived--name-at-point)))
-    (unless name (user-error "No project at point"))
+  (let* ((name (workbench-archived--name-at-point))
+         (_ (unless name (user-error "No project at point")))
+         (all (workbench--load-all-projects))
+         (project (cl-find name all :key #'workbench--project-name :test #'equal))
+         (pwts (workbench--project-worktrees project))
+         (hidden (workbench--load-hidden-worktrees))
+         (stale nil)
+         (restored 0))
+    ;; Restore each worktree reference
+    (dolist (pw pwts)
+      (let* ((wt-path (expand-file-name (cdr (assq 'worktree_path pw))))
+             (repo (expand-file-name (cdr (assq 'repo pw))))
+             (branch (cdr (assq 'branch pw))))
+        (cond
+         ;; Hidden (main worktree) → unhide
+         ((member wt-path hidden)
+          (workbench--unhide-worktree wt-path)
+          (cl-incf restored))
+         ;; Worktree directory still exists → nothing to do
+         ((file-directory-p wt-path)
+          (cl-incf restored))
+         ;; Branch still exists in git → recreate worktree
+         ((workbench--branch-exists-p repo branch)
+          (condition-case nil
+              (progn
+                (make-directory (file-name-directory wt-path) t)
+                (workbench--git-output repo "worktree" "add" wt-path branch)
+                (cl-incf restored))
+            (error (push pw stale))))
+         ;; Branch gone → mark as stale
+         (t (push pw stale)))))
+    ;; Remove stale worktree references from the project
+    (when stale
+      (let ((stale-paths (mapcar (lambda (pw)
+                                   (expand-file-name (cdr (assq 'worktree_path pw))))
+                                 stale)))
+        (setcdr (assq 'worktrees project)
+                (vconcat (cl-remove-if
+                          (lambda (w)
+                            (member (expand-file-name (cdr (assq 'worktree_path w)))
+                                    stale-paths))
+                          (append (cdr (assq 'worktrees project)) nil))))
+        (workbench--save-all-projects all)))
     (workbench--unarchive-project name)
-    (message "Restored project %s" name)
+    (message "Restored project %s (%d worktree%s%s)"
+             name restored
+             (if (= restored 1) "" "s")
+             (if stale (format ", %d stale removed" (length stale)) ""))
     (workbench-archived--refresh)
     (workbench-refresh)))
 
@@ -2105,7 +2263,7 @@ Windows & Apps > Prefer tabs when opening documents > Always."
   (let ((wb-buf (get-buffer "*workbench*")))
     (when wb-buf
       (kill-buffer wb-buf)))
-  (load-file (expand-file-name "~/src/workbench/.worktrees/move-projects-and-wt-around/elisp/workbench.el"))
+  (load-file (expand-file-name "~/src/workbench/elisp/workbench.el"))
   (setq workbench-open-git-function #'kyle-git-opener-workflow)
   (setq workbench-open-terminal-function #'kyle-terminal-workflow)
   (setq workbench-open-claude-function #'kyle-claude-workflow)
