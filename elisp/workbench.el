@@ -182,7 +182,7 @@ Called with two args: worktree directory and session plist."
 ;; ══════════════════════════════════════════════════════════════════
 
 (defvar workbench--refresh-timer nil)
-(defvar workbench--pr-cache nil "Alist of (branch . pr-plist).")
+(defvar workbench--pr-cache nil "Alist of ((repo . branch) . pr-plist).")
 (defvar workbench--fold-cache nil "Hash table of fold states (buffer-local, not persisted).")
 (defvar workbench--wt-cache nil "Cached list of all worktree plists.")
 (defvar workbench--extras-cache nil "Hash table of path -> (status sessions last-commit).")
@@ -198,14 +198,19 @@ Called with two args: worktree directory and session plist."
 (defconst workbench--col-indent 6)
 
 (defun workbench--col-branch ()
-  "Compute branch column width to fill available space."
-  (let* ((fixed (+ workbench--col-indent
+  "Compute branch column width to fill available space.
+Measures the window showing the current buffer, not the selected
+window — refreshes fire from timers/sentinels while other windows
+are selected."
+  (let* ((win (get-buffer-window (current-buffer) 'visible))
+         (width (if win (window-width win) (frame-width)))
+         (fixed (+ workbench--col-indent
                    workbench--col-repo
                    workbench--col-status
                    workbench--col-sessions
                    workbench--col-pr
                    workbench--col-commit))
-         (available (- (window-width) fixed)))
+         (available (- width fixed)))
     (max 20 available)))
 
 ;; ══════════════════════════════════════════════════════════════════
@@ -505,20 +510,20 @@ parent dirs are added until all names are unique."
                   (plist-put e :depth (min (1+ (plist-get e :depth)) (length (plist-get e :parts))))
                   (setq any-dup t))))
             (unless any-dup (setq max-iter 0))))))
-    ;; Build display names, only add ~ prefix when disambiguation needed it
-    (mapcar (lambda (e)
-              (let* ((full (plist-get e :full))
-                     (suffix (workbench--build-suffix (plist-get e :parts) (plist-get e :depth)))
-                     (depth (plist-get e :depth))
-                     (total-parts (length (plist-get e :parts)))
-                     ;; Only add ~ when we've swum up past ~ boundary
-                     (display (if (and (> depth 1)
-                                       (string-prefix-p home full)
-                                       (= depth total-parts))
-                                  (concat "~/" suffix)
-                                suffix)))
-                (cons display (plist-get e :path))))
-            entries)))
+    ;; Build display names; once a suffix reaches into the home prefix,
+    ;; show the path as ~/relative instead
+    (let ((home-parts (length (split-string (directory-file-name home) "/" t))))
+      (mapcar (lambda (e)
+                (let* ((full (plist-get e :full))
+                       (suffix (workbench--build-suffix (plist-get e :parts) (plist-get e :depth)))
+                       (depth (plist-get e :depth))
+                       (total-parts (length (plist-get e :parts)))
+                       (display (if (and (string-prefix-p home full)
+                                         (> depth (- total-parts home-parts)))
+                                    (concat "~/" (file-relative-name full home))
+                                  suffix)))
+                  (cons display (plist-get e :path))))
+              entries))))
 
 (defun workbench--build-suffix (reversed-parts depth)
   "Build a path suffix from REVERSED-PARTS with DEPTH components."
@@ -573,14 +578,18 @@ Uses `git worktree add -B` to force-reset an existing branch."
                  :key (lambda (w) (plist-get w :path)) :test #'equal)
         (list :path wt-path :branch branch :head "unknown" :repo repo-path))))
 
-(defun workbench--remove-worktree (wt-path)
-  "Remove the worktree at WT-PATH."
-  (let* ((default-directory (file-name-as-directory (expand-file-name wt-path)))
-         (result (with-temp-buffer
-                   (call-process "git" nil t nil "worktree" "remove" wt-path "--force")
-                   (buffer-string))))
-    (when (string-match-p "fatal" result)
-      (user-error "Failed to remove worktree: %s" (string-trim result)))))
+(defun workbench--remove-worktree (wt)
+  "Remove the worktree WT (a plist with :path and :repo).
+Runs git from the repo so removal works even when the worktree
+directory has already been deleted."
+  (let ((repo (file-name-as-directory (expand-file-name (plist-get wt :repo))))
+        (wt-path (expand-file-name (plist-get wt :path))))
+    (unless (file-directory-p repo)
+      (user-error "Repo directory not found: %s" repo))
+    (let ((default-directory repo))
+      (with-temp-buffer
+        (unless (= 0 (call-process "git" nil t nil "worktree" "remove" wt-path "--force"))
+          (user-error "Failed to remove worktree: %s" (string-trim (buffer-string))))))))
 
 ;; ══════════════════════════════════════════════════════════════════
 ;; Claude Code sessions
@@ -591,12 +600,16 @@ Uses `git worktree add -B` to force-reset an existing branch."
   (expand-file-name "~/.claude/projects/"))
 
 (defun workbench--claude-project-dir (wt-path)
-  "Find the Claude project directory for WT-PATH."
-  (let* ((resolved (expand-file-name wt-path))
-         (encoded (replace-regexp-in-string "[/.]" "-" resolved))
-         (candidate (expand-file-name encoded (workbench--claude-projects-dir))))
-    (when (file-directory-p candidate)
-      candidate)))
+  "Find the Claude project directory for WT-PATH.
+Tries the path as given and with symlinks resolved, matching the
+Python session parser."
+  (let ((projects-dir (workbench--claude-projects-dir)))
+    (cl-loop for resolved in (delete-dups (list (expand-file-name wt-path)
+                                                (file-truename wt-path)))
+             for encoded = (replace-regexp-in-string "[/.]" "-" resolved)
+             for candidate = (expand-file-name encoded projects-dir)
+             when (file-directory-p candidate)
+             return candidate)))
 
 (defun workbench--claude-list-sessions (wt-path)
   "List Claude sessions for WT-PATH.
@@ -614,22 +627,30 @@ Returns list of plists (:id :label :last-active)."
             (when session (push session sessions))))
         (nreverse sessions)))))
 
+(defun workbench--session-label-text-p (text)
+  "Return non-nil if TEXT is suitable as a session label.
+Filters out caveat banners, command/meta XML, and blank strings."
+  (let ((trimmed (string-trim text)))
+    (and (not (string-empty-p trimmed))
+         (not (string-prefix-p "Caveat:" trimmed))
+         (not (string-prefix-p "<" trimmed)))))
+
 (defun workbench--parse-claude-session (path)
-  "Parse a Claude session JSONL file at PATH.  Return plist or nil."
+  "Parse a Claude session JSONL file at PATH.  Return plist or nil.
+Stops reading once a label is found; last activity comes from the
+file's mtime rather than scanning every line."
   (condition-case nil
       (let ((label (file-name-sans-extension (file-name-nondirectory path)))
-            (first-user-msg nil)
-            (last-ts nil))
+            (first-user-msg nil))
         (with-temp-buffer
           (insert-file-contents path)
           (goto-char (point-min))
-          (while (not (eobp))
+          (while (and (not first-user-msg) (not (eobp)))
             (let ((line (buffer-substring-no-properties (line-beginning-position) (line-end-position))))
               (unless (string-empty-p line)
                 (condition-case nil
                     (let ((entry (json-read-from-string line)))
-                      ;; Extract first user message
-                      (unless first-user-msg
+                      (unless (eq (cdr (assq 'isMeta entry)) t)
                         (let* ((msg (cdr (assq 'message entry)))
                                (type (cdr (assq 'type entry)))
                                (role (and msg (cdr (assq 'role msg)))))
@@ -639,65 +660,82 @@ Returns list of plists (:id :label :last-active)."
                               (cond
                                ((vectorp content)
                                 (cl-loop for block across content
-                                         when (and (listp block) (equal (cdr (assq 'type block)) "text"))
-                                         do (setq first-user-msg (substring (cdr (assq 'text block)) 0
-                                                                            (min 80 (length (cdr (assq 'text block))))))
+                                         for text = (and (listp block)
+                                                         (equal (cdr (assq 'type block)) "text")
+                                                         (cdr (assq 'text block)))
+                                         when (and text (workbench--session-label-text-p text))
+                                         do (setq first-user-msg
+                                                  (substring text 0 (min 80 (length text))))
                                          and return nil))
-                               ((stringp content)
-                                (setq first-user-msg (substring content 0 (min 80 (length content))))))))))
-                      ;; Track timestamp
-                      (let ((ts (cdr (assq 'timestamp entry))))
-                        (when (stringp ts) (setq last-ts ts))))
+                               ((and (stringp content)
+                                     (workbench--session-label-text-p content))
+                                (setq first-user-msg
+                                      (substring content 0 (min 80 (length content)))))))))))
                   (error nil))))
             (forward-line 1)))
         (when first-user-msg
           (setq label (replace-regexp-in-string "\\s-+" " " (string-trim first-user-msg))))
         (list :id (file-name-sans-extension (file-name-nondirectory path))
               :label (if (> (length label) 80) (substring label 0 80) label)
-              :last-active (workbench--relative-time last-ts)))
+              :last-active (workbench--relative-time-from
+                            (file-attribute-modification-time (file-attributes path)))))
     (error nil)))
+
+(defun workbench--relative-time-from (time)
+  "Convert TIME (an Emacs time value) to a relative time string."
+  (if (null time) "unknown"
+    (let ((seconds (float-time (time-subtract (current-time) time))))
+      (cond
+       ((< seconds 60) "just now")
+       ((< seconds 3600) (format "%dm ago" (floor seconds 60)))
+       ((< seconds 86400) (format "%dh ago" (floor seconds 3600)))
+       (t (format "%dd ago" (floor seconds 86400)))))))
 
 (defun workbench--relative-time (iso-timestamp)
   "Convert ISO-TIMESTAMP to a relative time string."
   (if (null iso-timestamp) "unknown"
     (condition-case nil
-        (let* ((time (date-to-time iso-timestamp))
-               (seconds (float-time (time-subtract (current-time) time))))
-          (cond
-           ((< seconds 60) "just now")
-           ((< seconds 3600) (format "%dm ago" (floor seconds 60)))
-           ((< seconds 86400) (format "%dh ago" (floor seconds 3600)))
-           (t (format "%dd ago" (floor seconds 86400)))))
+        (workbench--relative-time-from (date-to-time iso-timestamp))
       (error "unknown"))))
 
 ;; ══════════════════════════════════════════════════════════════════
 ;; PR operations (via gh CLI)
 ;; ══════════════════════════════════════════════════════════════════
 
-(defun workbench--create-pr (branch base dir)
-  "Create a PR for BRANCH against BASE.  DIR must be inside the repo.
-Return PR plist."
-  (let ((default-directory (file-name-as-directory (expand-file-name dir))))
-    (with-temp-buffer
-      (let ((exit-code (call-process "gh" nil t nil
-                                     "pr" "create" "--head" branch "--base" base "--fill")))
-        (unless (= exit-code 0)
-          (user-error "Failed to create PR: %s" (string-trim (buffer-string))))))
-    ;; Fetch the created PR
-    (with-temp-buffer
-      (let ((exit-code (call-process "gh" nil t nil
-                                     "pr" "view" branch "--json" "number,url,state,title")))
-        (when (= exit-code 0)
-          (let ((data (json-read-from-string (buffer-string))))
-            (list :number (cdr (assq 'number data))
-                  :url (cdr (assq 'url data))
-                  :state (cdr (assq 'state data))
-                  :title (cdr (assq 'title data)))))))))
+(defun workbench--create-pr-async (branch base dir)
+  "Create a PR for BRANCH against BASE asynchronously.
+DIR must be inside the repo.  Messages the result and refreshes
+the workbench buffer when done."
+  (let ((output-buf (generate-new-buffer " *workbench-gh-create*"))
+        (default-directory (file-name-as-directory (expand-file-name dir))))
+    (message "Creating PR for %s..." branch)
+    (make-process
+     :name "workbench-gh-create"
+     :buffer output-buf
+     :command (list "gh" "pr" "create" "--head" branch "--base" base "--fill")
+     :sentinel
+     (lambda (proc _event)
+       (unless (process-live-p proc)
+         (unwind-protect
+             (if (and (eq (process-status proc) 'exit)
+                      (= (process-exit-status proc) 0))
+                 (progn
+                   (message "Created PR for %s" branch)
+                   (workbench-refresh))
+               (message "Failed to create PR: %s"
+                        (string-trim (with-current-buffer output-buf (buffer-string)))))
+           (kill-buffer output-buf)))))))
 
 (defun workbench--open-pr-in-browser (branch dir)
   "Open PR for BRANCH in browser.  DIR must be inside the repo."
   (let ((default-directory (file-name-as-directory (expand-file-name dir))))
-    (call-process "gh" nil nil nil "pr" "view" branch "--web")))
+    (start-process "workbench-gh-view" nil "gh" "pr" "view" branch "--web")))
+
+(defun workbench--pr-for (wt)
+  "Return the cached PR plist for worktree WT, or nil."
+  (cdr (assoc (cons (directory-file-name (expand-file-name (plist-get wt :repo)))
+                    (plist-get wt :branch))
+              workbench--pr-cache)))
 
 ;; ══════════════════════════════════════════════════════════════════
 ;; Tool launchers
@@ -711,6 +749,10 @@ Return PR plist."
        (start-process "workbench-term" nil "open" "-a" "Terminal" dir))
       ("iterm2"
        (start-process "workbench-term" nil "open" "-a" "iTerm" dir)))))
+
+(defun workbench--applescript-quote (str)
+  "Return STR as a double-quoted AppleScript string literal."
+  (concat "\"" (replace-regexp-in-string "[\"\\\\]" "\\\\\\&" str) "\""))
 
 (defun workbench--run-in-terminal (cmd cwd)
   "Run CMD (list of strings) in CWD using the configured terminal."
@@ -727,7 +769,7 @@ Return PR plist."
        (let* ((shell-cmd (mapconcat #'shell-quote-argument cmd " "))
               (full-cmd (format "cd %s && exec %s" (shell-quote-argument cwd) shell-cmd))
               (apple-script (format "tell application \"iTerm\"\n  create window with default profile\n  tell current session of current window\n    write text %s\n  end tell\nend tell"
-                                    (shell-quote-argument full-cmd))))
+                                    (workbench--applescript-quote full-cmd))))
          (start-process "workbench-cmd" nil "osascript" "-e" apple-script))))))
 
 (defun workbench--open-ide (dir)
@@ -757,6 +799,10 @@ Return PR plist."
 (defun workbench--claude-resume-cmd (session-id)
   "Return the command list to resume Claude SESSION-ID."
   (list "caffeinate" "-i" "claude" "--resume" session-id))
+
+(defun workbench--claude-fork-cmd (session-id)
+  "Return the command list to fork Claude SESSION-ID into a new session."
+  (list "caffeinate" "-i" "claude" "--resume" session-id "--fork-session"))
 
 ;; ══════════════════════════════════════════════════════════════════
 ;; Buffer rendering
@@ -797,7 +843,7 @@ Return PR plist."
          (session-str (cond ((= session-count 0) "no sessions")
                             ((= session-count 1) "1 session")
                             (t (format "%d sessions" session-count))))
-         (pr-data (cdr (assoc full-branch workbench--pr-cache)))
+         (pr-data (workbench--pr-for wt))
          (pr-state (and pr-data (plist-get pr-data :state)))
          (pr-merged (and pr-state (string= pr-state "MERGED")))
          (pr-str (cond (pr-merged (format "#%d ✓" (plist-get pr-data :number)))
@@ -817,9 +863,10 @@ Return PR plist."
                                           (pr-data 'workbench-pr-face)
                                           (t 'workbench-dim-face)))
                   (propertize last-commit 'face 'workbench-dim-face)))))
-    (if pr-merged
-        (propertize line 'face 'workbench-merged-line-face)
-      line)))
+    (when pr-merged
+      ;; Append so the background combines with the per-column foregrounds
+      (add-face-text-property 0 (length line) 'workbench-merged-line-face t line))
+    line))
 
 (defun workbench--render-session-line (session)
   "Render a session line for SESSION plist."
@@ -848,22 +895,25 @@ Only runs when the buffer is displayed on a non-iconified frame."
         (workbench--async-refresh nil)))))
 
 (defvar workbench--refresh-in-progress nil)
+(defvar workbench--refresh-proc nil "The in-flight refresh process, if any.")
 
 (cl-defun workbench--async-refresh (&optional fetch-sessions)
   "Refresh data asynchronously.  FETCH-SESSIONS means parse Claude sessions too."
   (when workbench--refresh-in-progress
     (if fetch-sessions
         ;; Full refresh supersedes in-progress one — kill it
-        (let ((proc (get-process "workbench-git-refresh")))
-          (when (and proc (process-live-p proc))
-            (delete-process proc))
-          (setq workbench--refresh-in-progress nil))
+        (progn
+          (when (and workbench--refresh-proc (process-live-p workbench--refresh-proc))
+            (delete-process workbench--refresh-proc))
+          (setq workbench--refresh-in-progress nil
+                workbench--refresh-proc nil))
       (cl-return-from workbench--async-refresh)))
   ;; Load projects from JSON (instant file read)
   (setq workbench--projects-cache (workbench--load-projects))
-  ;; Render immediately with whatever cache we have
-  (workbench--rerender)
+  ;; Render immediately only for explicit refreshes — timer refreshes
+  ;; redraw once in the sentinel, avoiding a redundant repaint every tick
   (when fetch-sessions
+    (workbench--rerender)
     (setq header-line-format " workbench — refreshing..."))
   ;; Run everything in one async shell process
   (let* ((repos (workbench--load-repos))
@@ -874,39 +924,48 @@ Only runs when the buffer is displayed on a non-iconified frame."
          (hidden-list hidden)
          (output-buf (generate-new-buffer " *workbench-git-async*")))
     (setq workbench--refresh-in-progress t)
-    (make-process
-     :name "workbench-git-refresh"
-     :buffer output-buf
-     :command (list "bash" "-c" script)
-     :sentinel
-     (lambda (proc _event)
-       (when (eq (process-status proc) 'exit)
-         (unwind-protect
-             (when (and (= (process-exit-status proc) 0)
-                        (buffer-live-p buf))
-               (let ((parsed (workbench--parse-full-output output-buf hidden-list)))
-                 (with-current-buffer buf
-                   (setq workbench--wt-cache (car parsed))
-                   (let ((ht (or workbench--extras-cache (make-hash-table :test 'equal))))
-                     (dolist (r (cdr parsed))
-                       (let* ((path (car r))
-                              (status (cadr r))
-                              (last-commit (caddr r))
-                              (old (gethash path ht))
-                              (old-sessions (and old (plist-get old :sessions)))
-                              (old-fetched (and old (plist-get old :sessions-fetched))))
-                         (puthash path (list :status status
-                                            :last-commit last-commit
-                                            :sessions old-sessions
-                                            :sessions-fetched old-fetched)
-                                  ht)))
-                     (setq workbench--extras-cache ht))
-                   (workbench--rerender)
-                   (when do-sessions
-                     (workbench--fetch-prs-async)
-                     (workbench--fetch-sessions-incrementally)))))
-           (setq workbench--refresh-in-progress nil)
-           (kill-buffer output-buf)))))))
+    (setq workbench--refresh-proc
+          (make-process
+           :name "workbench-git-refresh"
+           :buffer output-buf
+           :command (list "bash" "-c" script)
+           :sentinel
+           (lambda (proc _event)
+             ;; Runs on normal exit AND when killed by a superseding refresh —
+             ;; cleanup must happen in both cases
+             (unless (process-live-p proc)
+               (unwind-protect
+                   (when (and (eq (process-status proc) 'exit)
+                              (= (process-exit-status proc) 0)
+                              (buffer-live-p buf))
+                     (let ((parsed (workbench--parse-full-output output-buf hidden-list)))
+                       (with-current-buffer buf
+                         (setq workbench--wt-cache (car parsed))
+                         (let ((ht (or workbench--extras-cache (make-hash-table :test 'equal))))
+                           (dolist (r (cdr parsed))
+                             (let* ((path (car r))
+                                    (status (cadr r))
+                                    (last-commit (caddr r))
+                                    (old (gethash path ht))
+                                    (old-sessions (and old (plist-get old :sessions)))
+                                    (old-fetched (and old (plist-get old :sessions-fetched))))
+                               (puthash path (list :status status
+                                                   :last-commit last-commit
+                                                   :sessions old-sessions
+                                                   :sessions-fetched old-fetched)
+                                        ht)))
+                           (setq workbench--extras-cache ht))
+                         (workbench--rerender)
+                         (when do-sessions
+                           (workbench--fetch-prs-async)
+                           (workbench--fetch-sessions-incrementally)))))
+                 ;; Only clear the flag if we're still the current refresh —
+                 ;; a superseding refresh may have already started a new process
+                 (when (eq proc workbench--refresh-proc)
+                   (setq workbench--refresh-in-progress nil
+                         workbench--refresh-proc nil))
+                 (when (buffer-live-p output-buf)
+                   (kill-buffer output-buf)))))))))
 
 (defun workbench--fetch-sessions-incrementally ()
   "Fetch Claude sessions for all worktrees via an async Python subprocess."
@@ -948,22 +1007,22 @@ from datetime import datetime, timezone
 projects_dir = sys.argv[1]
 wt_paths = sys.argv[2].split('\\n') if len(sys.argv) > 2 and sys.argv[2] else []
 
-def relative_time(iso_ts):
+def relative_time(epoch):
     try:
-        dt = datetime.fromisoformat(iso_ts)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        delta = (datetime.now(timezone.utc) - dt).total_seconds()
+        delta = datetime.now(timezone.utc).timestamp() - epoch
         if delta < 60: return 'just now'
         if delta < 3600: return f'{int(delta//60)}m ago'
         if delta < 86400: return f'{int(delta//3600)}h ago'
         return f'{int(delta//86400)}d ago'
     except: return 'unknown'
 
+def label_ok(text):
+    t = text.strip()
+    return bool(t) and not t.startswith('Caveat:') and not t.startswith('<')
+
 def parse_session(path):
     label = os.path.splitext(os.path.basename(path))[0]
     first_msg = None
-    last_ts = None
     try:
         with open(path) as f:
             for line in f:
@@ -971,32 +1030,38 @@ def parse_session(path):
                 if not line: continue
                 try:
                     entry = json.loads(line)
-                    if first_msg is None:
-                        msg = entry.get('message', {})
-                        if entry.get('type') == 'user' or (isinstance(msg, dict) and msg.get('role') == 'user'):
-                            content = (msg.get('content') if isinstance(msg, dict) else None) or entry.get('content', '')
-                            if isinstance(content, list):
-                                for block in content:
-                                    if isinstance(block, dict) and block.get('type') == 'text':
-                                        first_msg = block['text'][:80]
-                                        break
-                            elif isinstance(content, str) and content.strip():
-                                first_msg = content.strip()[:80]
-                    ts = entry.get('timestamp')
-                    if isinstance(ts, str): last_ts = ts
+                    if entry.get('isMeta'): continue
+                    msg = entry.get('message', {})
+                    if entry.get('type') == 'user' or (isinstance(msg, dict) and msg.get('role') == 'user'):
+                        content = (msg.get('content') if isinstance(msg, dict) else None) or entry.get('content', '')
+                        if isinstance(content, list):
+                            for block in content:
+                                if isinstance(block, dict) and block.get('type') == 'text' and label_ok(block.get('text', '')):
+                                    first_msg = block['text'][:80]
+                                    break
+                        elif isinstance(content, str) and label_ok(content):
+                            first_msg = content.strip()[:80]
+                    if first_msg: break
                 except: pass
     except: return None
     if first_msg:
         label = ' '.join(first_msg.split())[:80]
     sid = os.path.splitext(os.path.basename(path))[0]
-    return (sid, label, relative_time(last_ts) if last_ts else 'unknown')
+    try:
+        last = relative_time(os.path.getmtime(path))
+    except: last = 'unknown'
+    return (sid, label, last)
 
 for wt_path in wt_paths:
     if not wt_path: continue
-    resolved = os.path.realpath(wt_path)
-    encoded = resolved.replace('/', '-').replace('.', '-')
-    proj_dir = os.path.join(projects_dir, encoded)
-    if not os.path.isdir(proj_dir): continue
+    proj_dir = None
+    for resolved in dict.fromkeys([os.path.abspath(wt_path), os.path.realpath(wt_path)]):
+        encoded = resolved.replace('/', '-').replace('.', '-')
+        d = os.path.join(projects_dir, encoded)
+        if os.path.isdir(d):
+            proj_dir = d
+            break
+    if proj_dir is None: continue
     files = sorted(glob.glob(os.path.join(proj_dir, '*.jsonl')),
                    key=lambda p: os.path.getmtime(p), reverse=True)
     for f in files:
@@ -1119,7 +1184,8 @@ When FETCH-SESSIONS is non-nil, also parse Claude sessions for every worktree."
         (setq workbench--pr-cache nil)
       (dolist (repo repos)
         (let ((output-buf (generate-new-buffer " *workbench-gh*"))
-              (repo-dir (file-name-as-directory (expand-file-name repo))))
+              (repo-dir (file-name-as-directory (expand-file-name repo)))
+              (repo-key (directory-file-name (expand-file-name repo))))
           (make-process
            :name (format "workbench-gh-pr-%s" (file-name-nondirectory (directory-file-name repo)))
            :buffer output-buf
@@ -1134,8 +1200,11 @@ When FETCH-SESSIONS is non-nil, also parse Claude sessions for every worktree."
                      (condition-case nil
                          (let ((data (with-current-buffer output-buf
                                        (json-read-from-string (buffer-string)))))
+                           ;; gh returns newest first — keep only the newest PR per branch
                            (cl-loop for item across data
-                                    do (push (cons (cdr (assq 'headRefName item))
+                                    for key = (cons repo-key (cdr (assq 'headRefName item)))
+                                    unless (assoc key all-results)
+                                    do (push (cons key
                                                    (list :number (cdr (assq 'number item))
                                                          :url (cdr (assq 'url item))
                                                          :state (cdr (assq 'state item))
@@ -1190,12 +1259,12 @@ mtime order, followed by ordered sessions in stored order."
   "Re-render the buffer from cached data (fast, no I/O)."
   (let* ((win (get-buffer-window (current-buffer)))
          (inhibit-read-only t)
-         (line (if win
-                   (line-number-at-pos (window-point win))
-                 (line-number-at-pos)))
+         (pt (if win (window-point win) (point)))
+         (line (line-number-at-pos pt))
+         (node (save-excursion (goto-char pt) (workbench--node-at-point)))
          (all-wts (or workbench--wt-cache nil))
-        (projects (or workbench--projects-cache nil))
-        (assigned-paths (make-hash-table :test 'equal)))
+         (projects (or workbench--projects-cache nil))
+         (assigned-paths (make-hash-table :test 'equal)))
     (erase-buffer)
     ;; Header line
     (insert (workbench--render-column-header) "\n")
@@ -1258,12 +1327,20 @@ mtime order, followed by ordered sessions in stored order."
           (format " workbench — %d project%s · %d worktree%s"
                   (length projects) (if (= (length projects) 1) "" "s")
                   (length all-wts) (if (= (length all-wts) 1) "" "s")))
-    ;; Restore cursor
-    (goto-char (point-min))
-    (forward-line (1- line))
-    (beginning-of-line)
-    (when (eobp) (forward-line -1))
-    (workbench--ensure-on-node)
+    ;; Restore cursor — prefer node identity so async refreshes that
+    ;; add/remove lines don't move point to a different item
+    (unless (and node
+                 (pcase (plist-get node :type)
+                   ('project (workbench--goto-node 'project (plist-get node :name)))
+                   ('worktree (workbench--goto-node
+                               'worktree (plist-get (plist-get node :wt) :path)))
+                   ('session (workbench--goto-node
+                              'session (plist-get (plist-get node :session) :id)))))
+      (goto-char (point-min))
+      (forward-line (1- line))
+      (beginning-of-line)
+      (when (eobp) (forward-line -1))
+      (workbench--ensure-on-node))
     (when win
       (set-window-point win (point)))))
 
@@ -1396,7 +1473,7 @@ Works for worktree lines and session lines (returns parent worktree)."
 
 (defun workbench-fork-session-default (dir session)
   "Default: fork Claude SESSION in a new terminal at DIR."
-  (workbench--run-in-terminal (workbench--claude-resume-cmd (plist-get session :id)) dir))
+  (workbench--run-in-terminal (workbench--claude-fork-cmd (plist-get session :id)) dir))
 
 (defun workbench-open-ide-default (dir)
   "Default: open IDE at DIR using `workbench-ide' setting."
@@ -1476,16 +1553,14 @@ Works for worktree lines and session lines (returns parent worktree)."
   (let ((wt (workbench--wt-at-point)))
     (unless wt (user-error "No worktree at point"))
     (let* ((branch (plist-get wt :branch))
-           (pr (cdr (assoc branch workbench--pr-cache))))
+           (pr (workbench--pr-for wt)))
       (if pr
           (progn
             (workbench--open-pr-in-browser branch (plist-get wt :path))
             (message "Opened PR #%d in browser" (plist-get pr :number)))
-        (let ((base (read-string "Create PR — base branch: " "main")))
-          (let ((new-pr (workbench--create-pr branch base (plist-get wt :path))))
-            (when new-pr
-              (message "Created PR #%d" (plist-get new-pr :number))
-              (workbench-refresh))))))))
+        (let ((base (read-string "Create PR — base branch: "
+                                 (workbench--repo-default-branch (plist-get wt :repo)))))
+          (workbench--create-pr-async branch base (plist-get wt :path)))))))
 
 (defun workbench-close-worktree ()
   "Close/remove the worktree at point."
@@ -1506,7 +1581,7 @@ Works for worktree lines and session lines (returns parent worktree)."
             (message "Hidden worktree %s" branch))
         (when project-name
           (workbench--remove-worktree-from-project project-name (plist-get wt :path)))
-        (workbench--remove-worktree (plist-get wt :path))
+        (workbench--remove-worktree wt)
         (message "Removed worktree %s" branch))
       (workbench-refresh))))
 
@@ -1541,8 +1616,8 @@ Works for worktree lines and session lines (returns parent worktree)."
          (ctx-repo-display (when ctx-repo
                              (car (cl-find ctx-repo repo-names
                                            :key #'cdr :test #'equal))))
-         (repo-choice (if (and ctx-repo-display (= (length repos) 1))
-                          ctx-repo-display
+         (repo-choice (if (= (length repos) 1)
+                          (car repo-display-names)
                         (completing-read "Repo: " repo-display-names nil t
                                          ctx-repo-display)))
          (repo-path (cdr (assoc repo-choice repo-names)))
@@ -1651,7 +1726,7 @@ Works for worktree lines and session lines (returns parent worktree)."
         (if (workbench--is-main-worktree wt)
             (workbench--hide-worktree (plist-get wt :path))
           (condition-case err
-              (workbench--remove-worktree (plist-get wt :path))
+              (workbench--remove-worktree wt)
             (error (message "Warning: %s" (error-message-string err))))))
       (workbench--archive-project name)
       (message "Archived project %s" name)
@@ -1809,7 +1884,8 @@ For session: IDENTIFIER is session id."
       (forward-line 1))
     (when target-line
       (goto-char (point-min))
-      (forward-line (1- target-line)))))
+      (forward-line (1- target-line))
+      t)))
 
 (defun workbench-move-up ()
   "Move the item at point up one position."
@@ -2049,7 +2125,8 @@ Press \\[workbench-dispatch] for a full list of keybindings."
     (with-current-buffer buf
       (unless (eq major-mode 'workbench-mode)
         (workbench-mode))
-      (workbench--async-refresh nil))
+      ;; Full refresh so sessions and PRs populate on first open
+      (workbench--async-refresh t))
     (pop-to-buffer buf)))
 
 (defun workbench--kill-buffer-hook ()
@@ -2204,7 +2281,7 @@ Windows & Apps > Prefer tabs when opening documents > Always."
 (defun kyle-fork-session-workflow (dir session)
   "Fork Claude SESSION in a Terminal.app tab at DIR."
   (kyle--run-in-terminal-tab
-   (kyle--cmd-to-shell-string (workbench--claude-resume-cmd (plist-get session :id)))
+   (kyle--cmd-to-shell-string (workbench--claude-fork-cmd (plist-get session :id)))
    dir))
 
 ;; To use:
