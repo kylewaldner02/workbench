@@ -80,6 +80,12 @@ For example, (\"kylewaldner/\" \"kyle/\") would display
   :group 'workbench
   :type 'function)
 
+(defcustom workbench-open-dired-function #'workbench-open-dired-default
+  "Function to open the worktree root in Emacs.
+Called with one arg: worktree directory."
+  :group 'workbench
+  :type 'function)
+
 (defcustom workbench-open-claude-function #'workbench-open-claude-default
   "Function to open Claude.  Called with one arg: worktree directory."
   :group 'workbench
@@ -1487,6 +1493,10 @@ Works for worktree lines and session lines (returns parent worktree)."
   "Default: open terminal at DIR using `workbench-terminal' setting."
   (workbench--open-terminal dir))
 
+(defun workbench-open-dired-default (dir)
+  "Default: open dired at the worktree root DIR."
+  (dired (file-name-as-directory (expand-file-name dir))))
+
 ;; Interactive commands — dispatch through customizable functions
 
 (defun workbench-open-claude ()
@@ -1546,6 +1556,14 @@ Works for worktree lines and session lines (returns parent worktree)."
     (unless wt (user-error "No worktree at point"))
     (funcall workbench-open-terminal-function (plist-get wt :path))
     (message "Opened terminal for %s" (plist-get wt :branch))))
+
+(defun workbench-open-dired ()
+  "Open the worktree root at point in Emacs (dired)."
+  (interactive)
+  (let ((wt (workbench--wt-at-point)))
+    (unless wt (user-error "No worktree at point"))
+    (funcall workbench-open-dired-function (plist-get wt :path))
+    (message "Opened %s" (plist-get wt :branch))))
 
 (defun workbench-open-pr ()
   "Open or create PR for the worktree at point."
@@ -2049,6 +2067,7 @@ For session: IDENTIFIER is session id."
    ("i" "IDE" workbench-open-ide)
    ("g" "Git client" workbench-open-git)
    ("t" "Terminal" workbench-open-terminal)
+   ("e" "Dired at root" workbench-open-dired)
    ("p" "PR" workbench-open-pr)]
   ["Worktree"
    ("n" "New worktree" workbench-new-worktree)
@@ -2086,6 +2105,7 @@ For session: IDENTIFIER is session id."
     (define-key map (kbd "i") #'workbench-open-ide)
     (define-key map (kbd "g") #'workbench-open-git)
     (define-key map (kbd "t") #'workbench-open-terminal)
+    (define-key map (kbd "e") #'workbench-open-dired)
     (define-key map (kbd "p") #'workbench-open-pr)
     ;; Worktree management
     (define-key map (kbd "x") #'workbench-close-worktree)
