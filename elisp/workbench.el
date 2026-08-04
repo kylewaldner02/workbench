@@ -486,6 +486,74 @@ Returns list of plists (:path :branch :head :repo :bare)."
             (push wt all)))))
     (nreverse all)))
 
+(defun workbench--scan-orphan-dirs (dir tracked-paths)
+  "Collect worktree-looking directories under DIR absent from TRACKED-PATHS.
+A directory counts as a worktree checkout when it contains a `.git'
+entry.  Directories that only exist to hold slash-containing branch
+names (e.g. `.worktrees/feature/') are descended into."
+  (when (file-directory-p dir)
+    (cl-loop for entry in (directory-files dir t "\\`[^.]" t)
+             when (file-directory-p entry)
+             append (let ((path (directory-file-name (expand-file-name entry))))
+                      (cond
+                       ((member path tracked-paths) nil)
+                       ((file-exists-p (expand-file-name ".git" path)) (list path))
+                       (t (workbench--scan-orphan-dirs path tracked-paths)))))))
+
+(defun workbench--orphan-worktree-dirs (repo-path tracked-paths)
+  "Return worktree directories under REPO-PATH/.worktrees/ not in TRACKED-PATHS."
+  (workbench--scan-orphan-dirs (expand-file-name ".worktrees" repo-path)
+                               tracked-paths))
+
+(defun workbench--recorded-worktree-paths ()
+  "Return paths of every worktree recorded in a live (non-archived) project."
+  (cl-loop for p in (workbench--load-projects)
+           append (mapcar (lambda (w)
+                            (directory-file-name
+                             (expand-file-name (cdr (assq 'worktree_path w)))))
+                          (workbench--project-worktrees p))))
+
+(defun workbench--missing-worktrees-for-repo (repo-path &optional recorded)
+  "Return worktrees of REPO-PATH that exist on disk but have no live record.
+RECORDED is the list of worktree paths already filed under a live project;
+it is computed when omitted.  Three cases are covered: worktrees workbench
+has hidden, worktrees git tracks that no project records, and directories
+under REPO-PATH/.worktrees/ that git no longer tracks.
+Each element is a plist (:path :branch :head :repo :kind) where :kind is
+`hidden', `unassigned' or `orphan'."
+  (let* ((hidden (mapcar (lambda (p) (directory-file-name (expand-file-name p)))
+                         (workbench--load-hidden-worktrees)))
+         (recorded (or recorded (workbench--recorded-worktree-paths)))
+         (tracked (workbench--list-worktrees-for-repo repo-path))
+         (tracked-paths (mapcar (lambda (w) (plist-get w :path)) tracked))
+         (result nil))
+    (dolist (wt tracked)
+      (let ((path (plist-get wt :path)))
+        (when (and (not (plist-get wt :bare))
+                   (file-directory-p path)
+                   (or (member path hidden)
+                       (not (member path recorded))))
+          (push (append wt (list :kind (if (member path hidden) 'hidden 'unassigned)))
+                result))))
+    (dolist (dir (workbench--orphan-worktree-dirs repo-path tracked-paths))
+      (push (list :path dir
+                  :branch (or (workbench--git-output dir "rev-parse" "--abbrev-ref" "HEAD")
+                              (file-name-nondirectory dir))
+                  :head (or (workbench--git-output dir "rev-parse" "HEAD") "")
+                  :repo (expand-file-name repo-path)
+                  :kind 'orphan)
+            result))
+    (nreverse result)))
+
+(defun workbench--repair-worktree (repo-path wt-path)
+  "Re-register WT-PATH as a worktree of REPO-PATH using `git worktree repair'.
+Return the worktree plist if git tracks it afterwards, else nil."
+  (workbench--git-output repo-path "worktree" "repair" wt-path)
+  (workbench--git-output wt-path "worktree" "repair")
+  (cl-find (directory-file-name (expand-file-name wt-path))
+           (workbench--list-worktrees-for-repo repo-path)
+           :key (lambda (w) (plist-get w :path)) :test #'equal))
+
 (defun workbench--repo-name (repo-path)
   "Return short name for REPO-PATH."
   (file-name-nondirectory (directory-file-name repo-path)))
@@ -1699,6 +1767,100 @@ Works for worktree lines and session lines (returns parent worktree)."
         (message "Created worktree for %s" branch)
         (workbench-refresh))))))
 
+(defun workbench--resurrect-label (wt)
+  "Return the completion label for candidate worktree WT."
+  (format "%s  [%s]  %s"
+          (plist-get wt :branch)
+          (pcase (plist-get wt :kind)
+            ('orphan "untracked")
+            ('hidden "hidden")
+            (_ "no project"))
+          (abbreviate-file-name (plist-get wt :path))))
+
+(defun workbench-resurrect-worktree ()
+  "File a worktree that exists on disk but has no record in workbench.
+Asks for the repo first, then for the worktree.  Candidates are worktrees
+that exist on disk but no live project records: ones workbench has hidden,
+ones sitting under \"No Project\", and directories under <repo>/.worktrees/
+that git no longer tracks (those are repaired with `git worktree repair').
+
+If the cursor is inside a project (on the project line, or on one of its
+worktrees or sessions), the worktree is added to that project; otherwise
+the project is asked for."
+  (interactive)
+  (let ((repos (workbench--load-repos))
+        (recorded (workbench--recorded-worktree-paths))
+        (by-repo nil))
+    (unless repos (user-error "No repos registered.  Use R to add one"))
+    (dolist (repo repos)
+      (when (file-directory-p repo)
+        (let ((missing (workbench--missing-worktrees-for-repo repo recorded)))
+          (when missing
+            (push (cons (expand-file-name repo) missing) by-repo)))))
+    (setq by-repo (nreverse by-repo))
+    (unless by-repo
+      (user-error "Every worktree on disk is already filed under a project"))
+    (let* ((ctx-project (workbench--context-project-name))
+           (ctx-repo (when ctx-project (workbench--project-repo ctx-project)))
+           ;; Repo selection — only repos that actually have candidates
+           (repo-names (workbench--disambiguate-paths (mapcar #'car by-repo)))
+           (repo-display-names (mapcar #'car repo-names))
+           (ctx-repo-display (when ctx-repo
+                               (car (cl-find ctx-repo repo-names
+                                             :key #'cdr :test #'equal))))
+           (repo-choice (if (= (length by-repo) 1)
+                            (car repo-display-names)
+                          (completing-read "Repo: " repo-display-names nil t
+                                           ctx-repo-display)))
+           (repo-path (cdr (assoc repo-choice repo-names)))
+           (candidates (cdr (assoc repo-path by-repo)))
+           ;; Worktree selection
+           (wt-names (mapcar (lambda (wt) (cons (workbench--resurrect-label wt) wt))
+                             candidates))
+           (wt-choice (completing-read "Worktree: " (mapcar #'car wt-names) nil t))
+           (wt (cdr (assoc wt-choice wt-names)))
+           (wt-path (plist-get wt :path))
+           ;; Project — cursor context wins, otherwise ask
+           (projects (mapcar #'workbench--project-name (workbench--load-projects)))
+           (project-name
+            (cond
+             ((and ctx-project (member ctx-project projects)) ctx-project)
+             ((null projects) nil)
+             (t (let ((choice (completing-read "Project: "
+                                               (cons "(no project)" projects) nil t)))
+                  (unless (string= choice "(no project)") choice))))))
+      ;; Bring it back into git's view if git lost track of it
+      (when (eq (plist-get wt :kind) 'orphan)
+        (let ((repaired (workbench--repair-worktree repo-path wt-path)))
+          (unless repaired
+            (user-error "Git could not re-register %s.  Move it aside and re-create the worktree"
+                        (abbreviate-file-name wt-path)))
+          (setq wt repaired)))
+      (workbench--unhide-worktree wt-path)
+      (if project-name
+          (progn
+            ;; Drop any stale record elsewhere, including archived projects
+            (dolist (p (workbench--load-all-projects))
+              (let ((other (workbench--project-name p)))
+                (when (and (not (equal other project-name))
+                           (cl-find wt-path (workbench--project-worktrees p)
+                                    :key (lambda (w)
+                                           (directory-file-name
+                                            (expand-file-name (cdr (assq 'worktree_path w)))))
+                                    :test #'equal))
+                  (workbench--remove-worktree-from-project other wt-path))))
+            (workbench--add-worktree-to-project project-name repo-path
+                                                (plist-get wt :branch) wt-path)
+            (message "Resurrected %s into project %s"
+                     (plist-get wt :branch) project-name))
+        (message "Resurrected %s" (plist-get wt :branch)))
+      ;; Show it immediately; the refresh below fills in status/sessions
+      (when (and workbench--wt-cache
+                 (not (cl-find wt-path workbench--wt-cache
+                               :key (lambda (w) (plist-get w :path)) :test #'equal)))
+        (push wt workbench--wt-cache))
+      (workbench-refresh))))
+
 (defun workbench-new-project ()
   "Create a new project."
   (interactive)
@@ -2071,6 +2233,7 @@ For session: IDENTIFIER is session id."
    ("p" "PR" workbench-open-pr)]
   ["Worktree"
    ("n" "New worktree" workbench-new-worktree)
+   ("u" "Resurrect worktree" workbench-resurrect-worktree)
    ("x" "Close worktree" workbench-close-worktree)
    ("a" "Assign to project" workbench-assign-to-project)]
   ["Session"
@@ -2110,6 +2273,7 @@ For session: IDENTIFIER is session id."
     ;; Worktree management
     (define-key map (kbd "x") #'workbench-close-worktree)
     (define-key map (kbd "n") #'workbench-new-worktree)
+    (define-key map (kbd "u") #'workbench-resurrect-worktree)
     (define-key map (kbd "P") #'workbench-new-project)
     (define-key map (kbd "R") #'workbench-add-repo)
     (define-key map (kbd "A") #'workbench-archive-project)
