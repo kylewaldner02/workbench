@@ -665,6 +665,45 @@ directory has already been deleted."
         (unless (= 0 (call-process "git" nil t nil "worktree" "remove" wt-path "--force"))
           (user-error "Failed to remove worktree: %s" (string-trim (buffer-string))))))))
 
+(defun workbench--remove-worktree-async (wt callback)
+  "Remove the worktree WT in the background, then call CALLBACK.
+CALLBACK receives nil on success, or an error string on failure.  Unlinking
+a large checkout takes seconds, so this must not block redisplay."
+  (let ((repo (file-name-as-directory (expand-file-name (plist-get wt :repo))))
+        (wt-path (expand-file-name (plist-get wt :path))))
+    (unless (file-directory-p repo)
+      (user-error "Repo directory not found: %s" repo))
+    (let ((output-buf (generate-new-buffer " *workbench-worktree-remove*"))
+          (default-directory repo))
+      (make-process
+       :name "workbench-worktree-remove"
+       :buffer output-buf
+       :noquery t
+       :command (list "git" "worktree" "remove" wt-path "--force")
+       :sentinel
+       (lambda (proc _event)
+         (when (eq (process-status proc) 'exit)
+           (let ((code (process-exit-status proc))
+                 (out (with-current-buffer output-buf
+                        (string-trim (buffer-string)))))
+             (unwind-protect
+                 (funcall callback
+                          (unless (= code 0)
+                            (if (string-empty-p out)
+                                (format "git exited with %d" code)
+                              out)))
+               (when (buffer-live-p output-buf)
+                 (kill-buffer output-buf))))))))))
+
+(defun workbench--drop-from-wt-cache (wt-path)
+  "Remove WT-PATH from the cached worktree list.
+Returns non-nil when the cache was populated and could be updated."
+  (when workbench--wt-cache
+    (setq workbench--wt-cache
+          (cl-remove wt-path workbench--wt-cache
+                     :key (lambda (w) (plist-get w :path)) :test #'equal))
+    t))
+
 ;; ══════════════════════════════════════════════════════════════════
 ;; Claude Code sessions
 ;; ══════════════════════════════════════════════════════════════════
@@ -1649,27 +1688,51 @@ Works for worktree lines and session lines (returns parent worktree)."
           (workbench--create-pr-async branch base (plist-get wt :path)))))))
 
 (defun workbench-close-worktree ()
-  "Close/remove the worktree at point."
+  "Close/remove the worktree at point.
+The `git worktree remove' runs in the background so Emacs stays responsive
+while git unlinks the checkout.  The row disappears right away and is
+restored if the removal fails; the project record is dropped only once git
+has actually removed the worktree."
   (interactive)
   (let* ((node (workbench--node-at-point))
          (wt (workbench--wt-at-point)))
     (unless wt (user-error "No worktree at point"))
-    (let ((branch (plist-get wt :branch))
-          (project-name (plist-get node :project-name)))
-      (when (workbench--has-unpushed-changes (plist-get wt :path) branch)
+    (let* ((branch (plist-get wt :branch))
+           (wt-path (plist-get wt :path))
+           (project-name (plist-get node :project-name)))
+      (when (workbench--has-unpushed-changes wt-path branch)
         (unless (y-or-n-p (format "Branch '%s' has unpushed changes. Close anyway? " branch))
           (user-error "Cancelled")))
       (if (workbench--is-main-worktree wt)
+          ;; Main worktree is never deleted, only hidden — nothing slow here
           (progn
-            (workbench--hide-worktree (plist-get wt :path))
+            (workbench--hide-worktree wt-path)
             (when project-name
-              (workbench--remove-worktree-from-project project-name (plist-get wt :path)))
-            (message "Hidden worktree %s" branch))
-        (when project-name
-          (workbench--remove-worktree-from-project project-name (plist-get wt :path)))
-        (workbench--remove-worktree wt)
-        (message "Removed worktree %s" branch))
-      (workbench-refresh))))
+              (workbench--remove-worktree-from-project project-name wt-path))
+            (when (workbench--drop-from-wt-cache wt-path)
+              (workbench--rerender))
+            (message "Hidden worktree %s" branch)
+            (workbench-refresh))
+        ;; Drop the row immediately, then let git do the slow unlinking
+        (when (workbench--drop-from-wt-cache wt-path)
+          (workbench--rerender))
+        (message "Removing worktree %s..." branch)
+        (workbench--remove-worktree-async
+         wt
+         (lambda (err)
+           (if err
+               ;; Put it back — the worktree is still on disk
+               (progn
+                 (when (and workbench--wt-cache
+                            (not (cl-find wt-path workbench--wt-cache
+                                          :key (lambda (w) (plist-get w :path))
+                                          :test #'equal)))
+                   (push wt workbench--wt-cache))
+                 (message "Failed to remove worktree %s: %s" branch err))
+             (when project-name
+               (workbench--remove-worktree-from-project project-name wt-path))
+             (message "Removed worktree %s" branch))
+           (workbench-refresh)))))))
 
 (defun workbench--context-project-name ()
   "Return the project name from cursor context, or nil."
