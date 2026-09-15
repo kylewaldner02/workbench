@@ -2,6 +2,16 @@
 
 Use when writing, debugging, or modifying Emacs Lisp code in this project (elisp/workbench.el).
 
+## Testing: you cannot run Emacs
+
+Claude cannot launch Emacs in this environment (no `emacs --batch`, no running
+Emacs to `emacsclient` into). Do NOT try. Instead:
+
+- Check paren balance and obvious syntax statically (e.g. a small Python scan).
+- Reason carefully about `let`/`let*`, quoting, and shell escaping.
+- Tell the user exactly what to reload and which key/command to try. The user
+  tests it in Emacs and reports back.
+
 ## Critical Gotchas
 
 ### `let` vs `let*`
@@ -68,6 +78,13 @@ Never block the UI with synchronous `call-process` for slow operations. Use `mak
                      )
                  (kill-buffer output-buf)))))
 ```
+
+### `make-process` chdirs to `default-directory` first
+If the buffer's `default-directory` no longer exists (e.g. a deleted worktree),
+every `make-process` from it fails with "Setting current directory: No such file
+or directory". The `*workbench*` buffer pins `default-directory` to `~/` in
+`workbench-mode` for this reason; keep that, and bind `default-directory`
+explicitly when a process must run inside a specific repo.
 
 ### Batch shell work into one subprocess
 Instead of N sequential `call-process` calls, build a single bash script that does all the work and outputs structured (tab-delimited) results. Parse in the sentinel.

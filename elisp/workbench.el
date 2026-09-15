@@ -850,6 +850,95 @@ the workbench buffer when done."
                     (plist-get wt :branch))
               workbench--pr-cache)))
 
+(defun workbench--project-live-worktrees (project-name)
+  "Return the worktree plists in PROJECT-NAME that exist in the current cache.
+When PROJECT-NAME is nil, return the worktrees not assigned to any project."
+  (let* ((all-wts (or workbench--wt-cache (workbench--list-all-worktrees)))
+         (projects (workbench--load-projects))
+         (paths-of (lambda (project)
+                     (mapcar (lambda (pw) (expand-file-name (cdr (assq 'worktree_path pw))))
+                             (workbench--project-worktrees project)))))
+    (if project-name
+        (let* ((project (cl-find project-name projects
+                                 :key #'workbench--project-name :test #'equal))
+               (paths (and project (funcall paths-of project))))
+          (cl-loop for path in paths
+                   for wt = (cl-find path all-wts
+                                     :key (lambda (w) (plist-get w :path))
+                                     :test #'equal)
+                   when wt collect wt))
+      (let ((assigned (cl-loop for project in projects
+                               append (funcall paths-of project))))
+        (cl-remove-if (lambda (wt) (member (plist-get wt :path) assigned)) all-wts)))))
+
+(defconst workbench--pr-status-script
+  "while [ $# -ge 2 ]; do
+  repo=$1; branch=$2; shift 2
+  out=$(cd \"$repo\" && NO_COLOR=1 gh pr view \"$branch\" --json number,url,state,title 2>&1)
+  code=$?
+  printf '%s\\t%s\\t%s\\t%s\\n' \"$repo\" \"$branch\" \"$code\" \"$(printf '%s' \"$out\" | tr '\\n\\t' '  ')\"
+done"
+  "Bash script that looks up the PR for each REPO BRANCH argument pair.
+Prints one tab-separated line per pair: repo, branch, gh exit code, and
+either the JSON PR data or gh's error output.")
+
+(defun workbench--fetch-pr-status-async (wts)
+  "Fetch the latest PR status for each worktree in WTS via `gh pr view'.
+Runs a single background process.  For each worktree the cached PR entry
+is replaced with fresh data, or removed when GitHub reports no PR for the
+branch.  Re-renders the workbench buffer and messages a summary when done."
+  (let* ((buf (current-buffer))
+         (output-buf (generate-new-buffer " *workbench-gh-status*"))
+         (args (cl-loop for wt in wts
+                        collect (directory-file-name (expand-file-name (plist-get wt :repo)))
+                        collect (plist-get wt :branch))))
+    (message "Fetching PR status for %d worktree%s..."
+             (length wts) (if (= (length wts) 1) "" "s"))
+    (make-process
+     :name "workbench-gh-pr-status"
+     :buffer output-buf
+     :command (append (list "bash" "-c" workbench--pr-status-script "workbench-pr-status") args)
+     :sentinel
+     (lambda (proc _event)
+       (when (eq (process-status proc) 'exit)
+         (unwind-protect
+             (let ((found 0) (missing 0) (errors nil) (single nil))
+               (dolist (line (split-string (with-current-buffer output-buf (buffer-string))
+                                           "\n" t))
+                 (let* ((parts (split-string line "\t"))
+                        (repo (nth 0 parts))
+                        (branch (nth 1 parts))
+                        (code (nth 2 parts))
+                        (out (string-trim (mapconcat #'identity (nthcdr 3 parts) "\t")))
+                        (key (cons repo branch)))
+                   (cond
+                    ((equal code "0")
+                     (condition-case nil
+                         (let* ((item (json-read-from-string out))
+                                (pr (list :number (cdr (assq 'number item))
+                                          :url (cdr (assq 'url item))
+                                          :state (cdr (assq 'state item))
+                                          :title (cdr (assq 'title item)))))
+                           (setq workbench--pr-cache
+                                 (cons (cons key pr)
+                                       (assoc-delete-all key workbench--pr-cache)))
+                           (setq found (1+ found)
+                                 single (format "%s: PR #%d %s" branch
+                                                (plist-get pr :number) (plist-get pr :state))))
+                       (error (push (format "%s: could not parse gh output" branch) errors))))
+                    ((string-match-p "no pull requests found" out)
+                     (setq workbench--pr-cache (assoc-delete-all key workbench--pr-cache))
+                     (setq missing (1+ missing)
+                           single (format "%s: no PR found" branch)))
+                    (t (push (format "%s: %s" branch out) errors)))))
+               (when (buffer-live-p buf)
+                 (with-current-buffer buf (workbench--rerender)))
+               (cond
+                (errors (message "PR status: %s" (string-join (nreverse errors) "; ")))
+                ((and single (= (+ found missing) 1)) (message "%s" single))
+                (t (message "PR status updated: %d with PR, %d without" found missing))))
+           (kill-buffer output-buf)))))))
+
 ;; ══════════════════════════════════════════════════════════════════
 ;; Tool launchers
 ;; ══════════════════════════════════════════════════════════════════
@@ -1287,49 +1376,82 @@ When FETCH-SESSIONS is non-nil, also parse Claude sessions for every worktree."
                  ht)))
     (setq workbench--extras-cache ht)))
 
+(defun workbench--pr-graphql-query (branches)
+  "Return a GraphQL query fetching the newest PR for each branch in BRANCHES.
+Each branch is aliased b0, b1, ... in the order given."
+  (concat
+   "query($owner:String!,$name:String!){repository(owner:$owner,name:$name){"
+   (cl-loop for branch in branches
+            for i from 0
+            concat (format "b%d:pullRequests(headRefName:%s,first:1,orderBy:{field:CREATED_AT,direction:DESC}){nodes{number url state title headRefName}} "
+                           i (json-encode-string branch)))
+   "}}"))
+
 (defun workbench--fetch-prs-async ()
-  "Fetch PR data asynchronously from all repos, then re-render."
-  (let* ((repos (workbench--load-repos))
-         (buf (current-buffer))
-         (remaining (length repos))
-         (all-results nil))
-    (if (null repos)
-        (setq workbench--pr-cache nil)
-      (dolist (repo repos)
-        (let ((output-buf (generate-new-buffer " *workbench-gh*"))
-              (repo-dir (file-name-as-directory (expand-file-name repo)))
-              (repo-key (directory-file-name (expand-file-name repo))))
-          (make-process
-           :name (format "workbench-gh-pr-%s" (file-name-nondirectory (directory-file-name repo)))
-           :buffer output-buf
-           :command (list "bash" "-c"
-                          (format "cd %s && NO_COLOR=1 gh pr list --state all --json number,url,state,title,headRefName --limit 100"
-                                  (shell-quote-argument repo-dir)))
-           :sentinel
-           (lambda (proc _event)
-             (when (eq (process-status proc) 'exit)
-               (unwind-protect
-                   (when (= (process-exit-status proc) 0)
-                     (condition-case nil
-                         (let ((data (with-current-buffer output-buf
-                                       (json-read-from-string (buffer-string)))))
-                           ;; gh returns newest first — keep only the newest PR per branch
-                           (cl-loop for item across data
-                                    for key = (cons repo-key (cdr (assq 'headRefName item)))
-                                    unless (assoc key all-results)
-                                    do (push (cons key
-                                                   (list :number (cdr (assq 'number item))
-                                                         :url (cdr (assq 'url item))
-                                                         :state (cdr (assq 'state item))
-                                                         :title (cdr (assq 'title item))))
-                                             all-results)))
-                       (error nil)))
-                 (kill-buffer output-buf)
-                 (setq remaining (1- remaining))
-                 (when (and (= remaining 0) (buffer-live-p buf))
-                   (with-current-buffer buf
-                     (setq workbench--pr-cache all-results)
-                     (workbench--rerender))))))))))))
+  "Fetch PR data asynchronously for every cached worktree branch, then re-render.
+One `gh api graphql' call per repo looks up exactly the branches that have
+worktrees, so PRs are found no matter how busy the repo is.  Entries for a
+repo are only replaced when its request succeeds; a failed request keeps
+whatever was cached before."
+  (let* ((buf (current-buffer))
+         (by-repo (make-hash-table :test 'equal))
+         (all-results nil)
+         (succeeded nil)
+         (remaining 0))
+    (dolist (wt workbench--wt-cache)
+      (let ((repo-key (directory-file-name (expand-file-name (plist-get wt :repo))))
+            (branch (plist-get wt :branch)))
+        (when (and branch (not (string-empty-p branch)))
+          (cl-pushnew branch (gethash repo-key by-repo) :test #'equal))))
+    (setq remaining (hash-table-count by-repo))
+    (when (= remaining 0)
+      (setq workbench--pr-cache nil))
+    (maphash
+     (lambda (repo-key branches)
+       (let ((output-buf (generate-new-buffer " *workbench-gh*"))
+             (repo-dir (file-name-as-directory repo-key))
+             (branches (reverse branches)))
+         (make-process
+          :name (format "workbench-gh-pr-%s" (file-name-nondirectory repo-key))
+          :buffer output-buf
+          :command (list "bash" "-c"
+                         (format "cd %s && NO_COLOR=1 gh api graphql -F owner='{owner}' -F name='{repo}' -f query=%s"
+                                 (shell-quote-argument repo-dir)
+                                 (shell-quote-argument (workbench--pr-graphql-query branches))))
+          :sentinel
+          (lambda (proc _event)
+            (when (eq (process-status proc) 'exit)
+              (unwind-protect
+                  (when (= (process-exit-status proc) 0)
+                    (condition-case nil
+                        (let* ((data (with-current-buffer output-buf
+                                       (json-read-from-string (buffer-string))))
+                               (repo (cdr (assq 'repository (cdr (assq 'data data))))))
+                          (cl-loop for branch in branches
+                                   for i from 0
+                                   for alias = (intern (format "b%d" i))
+                                   for nodes = (cdr (assq 'nodes (cdr (assq alias repo))))
+                                   for item = (and (> (length nodes) 0) (aref nodes 0))
+                                   when item
+                                   do (push (cons (cons repo-key branch)
+                                                  (list :number (cdr (assq 'number item))
+                                                        :url (cdr (assq 'url item))
+                                                        :state (cdr (assq 'state item))
+                                                        :title (cdr (assq 'title item))))
+                                            all-results))
+                          (push repo-key succeeded))
+                      (error nil)))
+                (kill-buffer output-buf)
+                (setq remaining (1- remaining))
+                (when (and (= remaining 0) (buffer-live-p buf))
+                  (with-current-buffer buf
+                    ;; Fresh results for repos that answered, old entries for the rest
+                    (setq workbench--pr-cache
+                          (append all-results
+                                  (cl-remove-if (lambda (entry) (member (caar entry) succeeded))
+                                                workbench--pr-cache)))
+                    (workbench--rerender)))))))))
+     by-repo)))
 
 (defun workbench--get-extras (path)
   "Get cached extras for worktree at PATH, or defaults."
@@ -1686,6 +1808,19 @@ Works for worktree lines and session lines (returns parent worktree)."
         (let ((base (read-string "Create PR — base branch: "
                                  (workbench--repo-default-branch (plist-get wt :repo)))))
           (workbench--create-pr-async branch base (plist-get wt :path)))))))
+
+(defun workbench-fetch-pr-status ()
+  "Fetch the latest PR status for the worktree at point.
+On a project line, fetch it for every worktree in that project.  A
+worktree with no known PR is checked on GitHub for one, so PRs that were
+opened outside workbench or fell outside the periodic listing show up."
+  (interactive)
+  (let* ((node (workbench--node-at-point))
+         (wts (pcase (and node (plist-get node :type))
+                ('project (workbench--project-live-worktrees (plist-get node :name)))
+                ((or 'worktree 'session) (list (plist-get node :wt))))))
+    (unless wts (user-error "No worktree at point"))
+    (workbench--fetch-pr-status-async wts)))
 
 (defun workbench-close-worktree ()
   "Close/remove the worktree at point.
@@ -2293,7 +2428,8 @@ For session: IDENTIFIER is session id."
    ("g" "Git client" workbench-open-git)
    ("t" "Terminal" workbench-open-terminal)
    ("e" "Dired at root" workbench-open-dired)
-   ("p" "PR" workbench-open-pr)]
+   ("p" "PR" workbench-open-pr)
+   ("F" "Fetch PR status" workbench-fetch-pr-status)]
   ["Worktree"
    ("n" "New worktree" workbench-new-worktree)
    ("u" "Resurrect worktree" workbench-resurrect-worktree)
@@ -2333,6 +2469,7 @@ For session: IDENTIFIER is session id."
     (define-key map (kbd "t") #'workbench-open-terminal)
     (define-key map (kbd "e") #'workbench-open-dired)
     (define-key map (kbd "p") #'workbench-open-pr)
+    (define-key map (kbd "F") #'workbench-fetch-pr-status)
     ;; Worktree management
     (define-key map (kbd "x") #'workbench-close-worktree)
     (define-key map (kbd "n") #'workbench-new-worktree)
@@ -2355,6 +2492,11 @@ For session: IDENTIFIER is session id."
 
 Press \\[workbench-dispatch] for a full list of keybindings."
   (setq-local revert-buffer-function (lambda (_ignore-auto _noconfirm) (workbench-refresh)))
+  ;; Background processes are spawned from this buffer, and `make-process'
+  ;; chdirs to `default-directory' first.  The buffer inherits that from
+  ;; wherever `workbench' was invoked, which may be a worktree that later
+  ;; gets deleted, so pin it to a directory that always exists.
+  (setq default-directory (expand-file-name "~/"))
   (setq truncate-lines t)
   (hl-line-mode 1)
   ;; Start auto-refresh timer
