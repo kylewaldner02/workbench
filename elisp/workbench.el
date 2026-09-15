@@ -435,12 +435,28 @@ are selected."
   (or (workbench--git-output dir "log" "-1" "--format=%cr") "no commits"))
 
 (defun workbench--has-unpushed-changes (dir branch)
-  "Return non-nil if DIR/BRANCH has uncommitted or unpushed changes."
+  "Return non-nil if DIR/BRANCH has uncommitted or unpushed changes.
+Unpushed means commits not on `origin/BRANCH'.  When that remote branch no
+longer exists (GitHub deletes it once a PR merges) the branch is compared
+against the remote default branch instead, so a fully merged branch is not
+reported as unpushed.  A missing default branch ref is treated as unpushed
+to stay on the safe side."
   (let ((status (workbench--git-output dir "status" "--porcelain")))
     (if (and status (not (string-empty-p status)))
         t
-      (let ((log (workbench--git-output dir "log" (format "origin/%s..%s" branch branch) "--oneline")))
+      (let* ((remote-ref (concat "refs/remotes/origin/" branch))
+             (upstream (if (workbench--git-output dir "rev-parse" "--verify" "--quiet" remote-ref)
+                           (concat "origin/" branch)
+                         (concat "origin/" (workbench--repo-default-branch dir))))
+             (log (workbench--git-output dir "log" (format "%s..%s" upstream branch) "--oneline")))
         (or (null log) (not (string-empty-p log)))))))
+
+(defun workbench--fetch-default-branch (repo)
+  "Update `origin/<default>' for REPO so merge checks see the latest remote state.
+Synchronous, but a single-branch fetch is quick.  Failures are ignored."
+  (let ((default-branch (workbench--repo-default-branch repo)))
+    (message "Fetching origin/%s in %s..." default-branch (file-name-nondirectory (directory-file-name repo)))
+    (workbench--git-output repo "fetch" "--quiet" "--no-tags" "origin" default-branch)))
 
 (defun workbench--list-worktrees-for-repo (repo-path)
   "Parse `git worktree list --porcelain` for REPO-PATH.
@@ -1878,26 +1894,108 @@ has actually removed the worktree."
               (workbench--rerender))
             (message "Hidden worktree %s" branch)
             (workbench-refresh))
-        ;; Drop the row immediately, then let git do the slow unlinking
-        (when (workbench--drop-from-wt-cache wt-path)
-          (workbench--rerender))
-        (message "Removing worktree %s..." branch)
-        (workbench--remove-worktree-async
-         wt
-         (lambda (err)
-           (if err
-               ;; Put it back — the worktree is still on disk
-               (progn
-                 (when (and workbench--wt-cache
-                            (not (cl-find wt-path workbench--wt-cache
-                                          :key (lambda (w) (plist-get w :path))
-                                          :test #'equal)))
-                   (push wt workbench--wt-cache))
-                 (message "Failed to remove worktree %s: %s" branch err))
-             (when project-name
-               (workbench--remove-worktree-from-project project-name wt-path))
-             (message "Removed worktree %s" branch))
-           (workbench-refresh)))))))
+        (workbench--close-worktree-async wt project-name)))))
+
+(defun workbench--close-worktree-async (wt project-name &optional callback)
+  "Drop WT's row right away and remove the worktree in the background.
+PROJECT-NAME is the project whose record should forget WT once git has
+removed it.  On failure the row is restored.  When CALLBACK is given it is
+called with nil or an error string after the bookkeeping is done and is
+responsible for refreshing; otherwise `workbench-refresh' runs here."
+  (let ((branch (plist-get wt :branch))
+        (wt-path (plist-get wt :path)))
+    ;; Drop the row immediately, then let git do the slow unlinking
+    (when (workbench--drop-from-wt-cache wt-path)
+      (workbench--rerender))
+    (message "Removing worktree %s..." branch)
+    (workbench--remove-worktree-async
+     wt
+     (lambda (err)
+       (if err
+           ;; Put it back — the worktree is still on disk
+           (progn
+             (when (and workbench--wt-cache
+                        (not (cl-find wt-path workbench--wt-cache
+                                      :key (lambda (w) (plist-get w :path))
+                                      :test #'equal)))
+               (push wt workbench--wt-cache))
+             (message "Failed to remove worktree %s: %s" branch err))
+         (when project-name
+           (workbench--remove-worktree-from-project project-name wt-path))
+         (message "Removed worktree %s" branch))
+       (if callback
+           (funcall callback err)
+         (workbench-refresh))))))
+
+(defun workbench--project-name-for-path (wt-path)
+  "Return the name of the project containing WT-PATH, or nil.
+Paths are normalized before comparison."
+  (let ((target (expand-file-name wt-path)))
+    (cl-loop for p in (workbench--load-projects)
+             when (cl-find target (workbench--project-worktrees p)
+                           :key (lambda (w) (expand-file-name (cdr (assq 'worktree_path w))))
+                           :test #'equal)
+             return (workbench--project-name p))))
+
+(defun workbench-close-merged-worktrees ()
+  "Close every worktree whose PR is merged.
+Skips main worktrees.  Behaves like pressing `x' on each merged worktree
+in turn: any worktree with uncommitted or unpushed changes gets its own
+yes/no prompt.  All prompts are answered first and the answers saved up;
+only then do removals start, so declining one worktree never affects the
+others and nothing is removed while a prompt is still open.  Removals run
+in the background and the buffer refreshes when the last one finishes."
+  (interactive)
+  (let* ((merged (cl-remove-if-not
+                  (lambda (wt)
+                    (let ((pr (workbench--pr-for wt)))
+                      (and pr
+                           (equal (plist-get pr :state) "MERGED")
+                           (not (workbench--is-main-worktree wt)))))
+                  workbench--wt-cache))
+         (approved nil)
+         (declined nil))
+    (unless merged (user-error "No worktrees with merged PRs"))
+    ;; Refresh origin/<default> once per repo so merged branches compare cleanly
+    (dolist (repo (delete-dups (mapcar (lambda (wt) (directory-file-name (expand-file-name (plist-get wt :repo))))
+                                       merged)))
+      (workbench--fetch-default-branch repo))
+    ;; Phase 1: collect an answer for every worktree.  No deletion happens here.
+    (dolist (wt merged)
+      (let ((branch (plist-get wt :branch)))
+        (if (or (not (workbench--has-unpushed-changes (plist-get wt :path) branch))
+                (y-or-n-p (format "Branch '%s' has unpushed changes. Close anyway? " branch)))
+            (push wt approved)
+          (push branch declined))))
+    (setq approved (nreverse approved))
+    (when declined
+      (message "Keeping: %s" (string-join (nreverse declined) ", ")))
+    ;; Phase 2: every prompt has been answered — now remove the approved ones.
+    (progn
+      (if (null approved)
+          (message "No worktrees closed")
+        (let ((remaining (length approved))
+              (failed nil)
+              (total (length approved)))
+          (dolist (wt approved)
+            (let* ((branch (plist-get wt :branch))
+                   (on-done
+                    (lambda (err)
+                      (when err (push branch failed))
+                      (setq remaining (1- remaining))
+                      (when (= remaining 0)
+                        (workbench-refresh)
+                        (if failed
+                            (message "Closed %d of %d merged worktree%s; failed: %s"
+                                     (- total (length failed)) total (if (= total 1) "" "s")
+                                     (string-join (nreverse failed) ", "))
+                          (message "Closed %d merged worktree%s" total (if (= total 1) "" "s")))))))
+              ;; A missing repo dir signals an error before the process starts;
+              ;; count it as a failure so the rest of the batch still runs
+              (condition-case e
+                  (workbench--close-worktree-async
+                   wt (workbench--project-name-for-path (plist-get wt :path)) on-done)
+                (error (funcall on-done (error-message-string e)))))))))))
 
 (defun workbench--context-project-name ()
   "Return the project name from cursor context, or nil."
@@ -2464,6 +2562,7 @@ For session: IDENTIFIER is session id."
    ("n" "New worktree" workbench-new-worktree)
    ("u" "Resurrect worktree" workbench-resurrect-worktree)
    ("x" "Close worktree" workbench-close-worktree)
+   ("X" "Close merged worktrees" workbench-close-merged-worktrees)
    ("a" "Assign to project" workbench-assign-to-project)]
   ["Session"
    ("s" "Resume" workbench-resume-session)
@@ -2502,6 +2601,7 @@ For session: IDENTIFIER is session id."
     (define-key map (kbd "F") #'workbench-fetch-pr-status)
     ;; Worktree management
     (define-key map (kbd "x") #'workbench-close-worktree)
+    (define-key map (kbd "X") #'workbench-close-merged-worktrees)
     (define-key map (kbd "n") #'workbench-new-worktree)
     (define-key map (kbd "u") #'workbench-resurrect-worktree)
     (define-key map (kbd "P") #'workbench-new-project)
