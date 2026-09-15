@@ -451,6 +451,25 @@ to stay on the safe side."
              (log (workbench--git-output dir "log" (format "%s..%s" upstream branch) "--oneline")))
         (or (null log) (not (string-empty-p log)))))))
 
+(defun workbench--wt-has-unpushed-changes (wt)
+  "Return non-nil if worktree WT has uncommitted or unpushed work.
+Like `workbench--has-unpushed-changes', but PR-aware: when WT's PR is
+merged and the local branch tip is still the commit GitHub merged, nothing
+was added after the merge and the branch counts as pushed.  This matters
+for squash merges, where the branch's commits never become ancestors of
+the default branch and a plain ancestry check would flag every merged PR."
+  (let* ((dir (plist-get wt :path))
+         (branch (plist-get wt :branch))
+         (pr (workbench--pr-for wt))
+         (head-oid (and pr (equal (plist-get pr :state) "MERGED") (plist-get pr :head-oid)))
+         (status (workbench--git-output dir "status" "--porcelain")))
+    (cond
+     ((and status (not (string-empty-p status))) t)
+     ((and head-oid
+           (equal (workbench--git-output dir "rev-parse" "--verify" "--quiet" branch) head-oid))
+      nil)
+     (t (workbench--has-unpushed-changes dir branch)))))
+
 (defun workbench--fetch-default-branch (repo)
   "Update `origin/<default>' for REPO so merge checks see the latest remote state.
 Synchronous, but a single-branch fetch is quick.  Failures are ignored."
@@ -955,7 +974,7 @@ When PROJECT-NAME is nil, return the worktrees not assigned to any project."
 (defconst workbench--pr-status-script
   "while [ $# -ge 2 ]; do
   repo=$1; branch=$2; shift 2
-  out=$(cd \"$repo\" && NO_COLOR=1 gh pr view \"$branch\" --json number,url,state,title 2>&1)
+  out=$(cd \"$repo\" && NO_COLOR=1 gh pr view \"$branch\" --json number,url,state,title,headRefOid 2>&1)
   code=$?
   printf '%s\\t%s\\t%s\\t%s\\n' \"$repo\" \"$branch\" \"$code\" \"$(printf '%s' \"$out\" | tr '\\n\\t' '  ')\"
 done"
@@ -999,7 +1018,8 @@ branch.  Re-renders the workbench buffer and messages a summary when done."
                                 (pr (list :number (cdr (assq 'number item))
                                           :url (cdr (assq 'url item))
                                           :state (cdr (assq 'state item))
-                                          :title (cdr (assq 'title item)))))
+                                          :title (cdr (assq 'title item))
+                                          :head-oid (cdr (assq 'headRefOid item)))))
                            (setq workbench--pr-cache
                                  (cons (cons key pr)
                                        (assoc-delete-all key workbench--pr-cache)))
@@ -1464,7 +1484,7 @@ Each branch is aliased b0, b1, ... in the order given."
    "query($owner:String!,$name:String!){repository(owner:$owner,name:$name){"
    (cl-loop for branch in branches
             for i from 0
-            concat (format "b%d:pullRequests(headRefName:%s,first:1,orderBy:{field:CREATED_AT,direction:DESC}){nodes{number url state title headRefName}} "
+            concat (format "b%d:pullRequests(headRefName:%s,first:1,orderBy:{field:CREATED_AT,direction:DESC}){nodes{number url state title headRefName headRefOid}} "
                            i (json-encode-string branch)))
    "}}"))
 
@@ -1518,7 +1538,8 @@ whatever was cached before."
                                                   (list :number (cdr (assq 'number item))
                                                         :url (cdr (assq 'url item))
                                                         :state (cdr (assq 'state item))
-                                                        :title (cdr (assq 'title item))))
+                                                        :title (cdr (assq 'title item))
+                                                        :head-oid (cdr (assq 'headRefOid item))))
                                             all-results))
                           (push repo-key succeeded))
                       (error nil)))
@@ -1938,7 +1959,7 @@ has actually removed the worktree."
     (let* ((branch (plist-get wt :branch))
            (wt-path (plist-get wt :path))
            (project-name (plist-get node :project-name)))
-      (when (workbench--has-unpushed-changes wt-path branch)
+      (when (workbench--wt-has-unpushed-changes wt)
         (unless (y-or-n-p (format "Branch '%s' has unpushed changes. Close anyway? " branch))
           (user-error "Cancelled")))
       (if (workbench--is-main-worktree wt)
@@ -2019,7 +2040,7 @@ in the background and the buffer refreshes when the last one finishes."
     ;; Phase 1: collect an answer for every worktree.  No deletion happens here.
     (dolist (wt merged)
       (let ((branch (plist-get wt :branch)))
-        (if (or (not (workbench--has-unpushed-changes (plist-get wt :path) branch))
+        (if (or (not (workbench--wt-has-unpushed-changes wt))
                 (y-or-n-p (format "Branch '%s' has unpushed changes. Close anyway? " branch)))
             (push wt approved)
           (push branch declined))))
@@ -2273,10 +2294,7 @@ the project is asked for."
                                                 :key (lambda (w) (plist-get w :path))
                                                 :test #'equal)
                               when wt collect wt))
-           (has-unpushed (cl-some (lambda (wt)
-                                    (workbench--has-unpushed-changes
-                                     (plist-get wt :path) (plist-get wt :branch)))
-                                  live-wts)))
+           (has-unpushed (cl-some #'workbench--wt-has-unpushed-changes live-wts)))
       (when has-unpushed
         (unless (y-or-n-p (format "Project '%s' has worktrees with unpushed changes. Archive anyway? " name))
           (user-error "Cancelled")))
