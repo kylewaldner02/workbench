@@ -163,6 +163,14 @@ Called with two args: worktree directory and session plist."
   "Background face for worktree lines with merged PRs."
   :group 'workbench)
 
+(defface workbench-merged-hl-line-face
+  '((((background dark)) :background "#3b1f63" :extend t)
+    (((background light)) :background "#dcc8f5" :extend t))
+  "Face for the cursor line (replacing `hl-line') when it shows a merged PR.
+A darker shade of `workbench-merged-line-face' so the row stays purple
+instead of taking the theme's generic highlight."
+  :group 'workbench)
+
 (defface workbench-dim-face
   '((t :foreground "gray60"))
   "Face for dim/secondary text."
@@ -1490,6 +1498,23 @@ mtime order, followed by ordered sessions in stored order."
                    workbench--extras-cache))
         sessions))))
 
+(defun workbench--merged-line-at-point-p ()
+  "Return non-nil if the worktree line at point has a merged PR."
+  (let* ((node (workbench--node-at-point))
+         (wt (and node (eq (plist-get node :type) 'worktree) (plist-get node :wt)))
+         (pr (and wt (workbench--pr-for wt))))
+    (and pr (equal (plist-get pr :state) "MERGED"))))
+
+(defun workbench--update-hl-line-face ()
+  "Tint the `hl-line' overlay purple when point is on a merged-PR line.
+Overlays always win over text properties, so without this the theme's
+`hl-line' background hides `workbench-merged-line-face' under the cursor."
+  (when (and (bound-and-true-p hl-line-mode) (bound-and-true-p hl-line-overlay))
+    (overlay-put hl-line-overlay 'face
+                 (if (workbench--merged-line-at-point-p)
+                     'workbench-merged-hl-line-face
+                   hl-line-face))))
+
 (defun workbench--rerender ()
   "Re-render the buffer from cached data (fast, no I/O)."
   (let* ((win (get-buffer-window (current-buffer)))
@@ -1577,7 +1602,12 @@ mtime order, followed by ordered sessions in stored order."
       (when (eobp) (forward-line -1))
       (workbench--ensure-on-node))
     (when win
-      (set-window-point win (point)))))
+      (set-window-point win (point)))
+    ;; Timer-driven rerenders don't run `post-command-hook', so re-place the
+    ;; cursor highlight and pick the right face for the line it lands on
+    (when (bound-and-true-p hl-line-mode)
+      (hl-line-highlight)
+      (workbench--update-hl-line-face))))
 
 (defun workbench--insert-worktree-node (wt project-name)
   "Insert a worktree node for WT under PROJECT-NAME."
@@ -2499,6 +2529,8 @@ Press \\[workbench-dispatch] for a full list of keybindings."
   (setq default-directory (expand-file-name "~/"))
   (setq truncate-lines t)
   (hl-line-mode 1)
+  ;; Runs after `hl-line-highlight' (depth 0) so the overlay exists and is placed
+  (add-hook 'post-command-hook #'workbench--update-hl-line-face 90 t)
   ;; Start auto-refresh timer
   (when workbench--refresh-timer
     (cancel-timer workbench--refresh-timer))
