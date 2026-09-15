@@ -719,6 +719,63 @@ a large checkout takes seconds, so this must not block redisplay."
                (when (buffer-live-p output-buf)
                  (kill-buffer output-buf))))))))))
 
+(defvar workbench--remove-queue nil
+  "Worktree removals waiting to run, each (WT PROJECT-NAME CALLBACK).
+Removals run one at a time: dozens of concurrent `git worktree remove'
+processes thrash the disk and make every other git command crawl.")
+(defvar workbench--remove-current nil "Branch of the removal in progress, or nil.")
+(defvar workbench--remove-total 0 "Removals queued in the current batch.")
+(defvar workbench--remove-done 0 "Removals finished in the current batch.")
+(defvar workbench--header-base " workbench" "Header-line text without the removal indicator.")
+
+(defun workbench--remove-indicator ()
+  "Return the header-line suffix describing removals in progress, or \"\"."
+  (if workbench--remove-current
+      (format " · removing %d/%d: %s"
+              (1+ workbench--remove-done) workbench--remove-total workbench--remove-current)
+    ""))
+
+(defun workbench--update-header-line (&optional base)
+  "Set the workbench header-line from BASE (or the last base) plus the removal indicator."
+  (when base (setq workbench--header-base base))
+  (let ((buf (get-buffer "*workbench*")))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (setq header-line-format (concat workbench--header-base (workbench--remove-indicator)))
+        (force-mode-line-update)))))
+
+(defun workbench--enqueue-removal (wt project-name callback)
+  "Queue WT for background removal and start the queue if idle.
+CALLBACK receives nil or an error string once this removal finishes."
+  (setq workbench--remove-queue
+        (append workbench--remove-queue (list (list wt project-name callback))))
+  (setq workbench--remove-total (1+ workbench--remove-total))
+  (if workbench--remove-current
+      (workbench--update-header-line)
+    (workbench--run-next-removal)))
+
+(defun workbench--run-next-removal ()
+  "Start the next queued removal, or reset the counters when the queue is empty."
+  (if (null workbench--remove-queue)
+      (progn
+        (setq workbench--remove-current nil
+              workbench--remove-total 0
+              workbench--remove-done 0)
+        (workbench--update-header-line))
+    (pcase-let ((`(,wt ,_project-name ,callback) (pop workbench--remove-queue)))
+      (setq workbench--remove-current (plist-get wt :branch))
+      (workbench--update-header-line)
+      (message "Removing worktree %s..." workbench--remove-current)
+      (let ((finish (lambda (err)
+                      (setq workbench--remove-done (1+ workbench--remove-done))
+                      (unwind-protect
+                          (funcall callback err)
+                        (workbench--run-next-removal)))))
+        (condition-case e
+            (workbench--remove-worktree-async wt finish)
+          ;; e.g. repo directory missing — report it and keep the queue moving
+          (error (funcall finish (error-message-string e))))))))
+
 (defun workbench--drop-from-wt-cache (wt-path)
   "Remove WT-PATH from the cached worktree list.
 Returns non-nil when the cache was populated and could be updated."
@@ -1140,7 +1197,7 @@ Only runs when the buffer is displayed on a non-iconified frame."
   ;; redraw once in the sentinel, avoiding a redundant repaint every tick
   (when fetch-sessions
     (workbench--rerender)
-    (setq header-line-format " workbench — refreshing..."))
+    (workbench--update-header-line " workbench — refreshing..."))
   ;; Run everything in one async shell process
   (let* ((repos (workbench--load-repos))
          (hidden (workbench--load-hidden-worktrees))
@@ -1599,10 +1656,10 @@ Overlays always win over text properties, so without this the theme's
             (dolist (wt unassigned)
               (workbench--insert-worktree-node wt nil))))))
     ;; Header-line
-    (setq header-line-format
-          (format " workbench — %d project%s · %d worktree%s"
-                  (length projects) (if (= (length projects) 1) "" "s")
-                  (length all-wts) (if (= (length all-wts) 1) "" "s")))
+    (workbench--update-header-line
+     (format " workbench — %d project%s · %d worktree%s"
+             (length projects) (if (= (length projects) 1) "" "s")
+             (length all-wts) (if (= (length all-wts) 1) "" "s")))
     ;; Restore cursor — prefer node identity so async refreshes that
     ;; add/remove lines don't move point to a different item
     (unless (and node
@@ -1907,9 +1964,8 @@ responsible for refreshing; otherwise `workbench-refresh' runs here."
     ;; Drop the row immediately, then let git do the slow unlinking
     (when (workbench--drop-from-wt-cache wt-path)
       (workbench--rerender))
-    (message "Removing worktree %s..." branch)
-    (workbench--remove-worktree-async
-     wt
+    (workbench--enqueue-removal
+     wt project-name
      (lambda (err)
        (if err
            ;; Put it back — the worktree is still on disk
@@ -1990,12 +2046,8 @@ in the background and the buffer refreshes when the last one finishes."
                                      (- total (length failed)) total (if (= total 1) "" "s")
                                      (string-join (nreverse failed) ", "))
                           (message "Closed %d merged worktree%s" total (if (= total 1) "" "s")))))))
-              ;; A missing repo dir signals an error before the process starts;
-              ;; count it as a failure so the rest of the batch still runs
-              (condition-case e
-                  (workbench--close-worktree-async
-                   wt (workbench--project-name-for-path (plist-get wt :path)) on-done)
-                (error (funcall on-done (error-message-string e)))))))))))
+              (workbench--close-worktree-async
+               wt (workbench--project-name-for-path (plist-get wt :path)) on-done))))))))
 
 (defun workbench--context-project-name ()
   "Return the project name from cursor context, or nil."
